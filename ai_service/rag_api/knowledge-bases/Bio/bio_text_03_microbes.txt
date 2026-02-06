@@ -1,0 +1,11 @@
+Microbiology (simple notes)
+
+Horizontal gene transfer (HGT) = genes moving between organisms (not parent to child).
+Common methods:
+- Transformation: uptake of free DNA from the environment
+- Transduction: DNA moved by viruses that infect bacteria (bacteriophages)
+- Conjugation: DNA passed through direct cell-to-cell contact (often via a plasmid)
+
+Biofilms:
+- Communities of microbes stuck to a surface, embedded in a protective matrix
+- Biofilms can make bacteria harder to kill (reduced antibiotic penetration, slower growth, protection)

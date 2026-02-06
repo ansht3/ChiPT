@@ -1,0 +1,13 @@
+Immunology (simple notes)
+
+Innate immunity:
+- Fast (minutes to hours)
+- Non-specific (general defenses)
+- Includes barriers (skin, mucus), inflammation, and cells like macrophages and neutrophils
+- Uses pattern recognition (recognizes common features of microbes)
+
+Adaptive immunity:
+- Slower to start (days)
+- Specific to particular pathogens
+- B cells make antibodies; T cells help coordinate or kill infected cells
+- Creates memory cells, so the second exposure is faster and stronger
