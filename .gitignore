@@ -1,2 +1,19 @@
-__pycache__/
+# secrets
 .env
+
+# python bytecode
+__pycache__/
+*.pyc
+
+# archives
+*.zip
+*.tar.gz
+
+# local databases / locks
+*.db
+*.db.lock
+*.sqlite
+*.sqlite3
+
+# milvus local state
+ai_service/rag_api/data/milvus_docs/
