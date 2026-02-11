@@ -501,3 +501,65 @@ async def delete_file_from_kb_endpoint(
          raise HTTPException(status_code=500, detail="Failed to delete file")
     return {"message": "Deleted successfully"}
 
+
+# --- Document Proxy Endpoints ---
+# These forward requests to the AI Service which holds the actual files
+
+from fastapi.responses import StreamingResponse
+from config import AI_SERVICE_URL
+import httpx
+
+@app.get("/kbs/{name}/docs/{file_uuid}")
+async def proxy_get_kb_document(name: str, file_uuid: str):
+    """Proxy for raw document retrieval."""
+    target_url = f"{AI_SERVICE_URL}/kbs/{name}/docs/{file_uuid}"
+    try:
+        client = httpx.AsyncClient()
+        req = client.build_request("GET", target_url)
+        r = await client.send(req, stream=True)
+        return StreamingResponse(
+            r.aiter_raw(),
+            status_code=r.status_code,
+            headers=r.headers,
+            background=None
+        )
+    except Exception as e:
+        logger.error(f"Proxy error for document: {e}")
+        raise HTTPException(status_code=500, detail="Document service unavailable")
+
+@app.get("/kbs/{name}/docs/{file_uuid}/view")
+async def proxy_view_kb_document(name: str, file_uuid: str):
+    """Proxy for document viewer."""
+    target_url = f"{AI_SERVICE_URL}/kbs/{name}/docs/{file_uuid}/view"
+    try:
+        client = httpx.AsyncClient()
+        req = client.build_request("GET", target_url)
+        r = await client.send(req, stream=True)
+        return StreamingResponse(
+            r.aiter_raw(),
+            status_code=r.status_code,
+            headers=r.headers,
+            background=None
+        )
+    except Exception as e:
+        logger.error(f"Proxy error for view: {e}")
+        raise HTTPException(status_code=500, detail="Document service unavailable")
+
+@app.get("/kbs/{name}/docs/{file_uuid}/download")
+async def proxy_download_kb_document(name: str, file_uuid: str):
+    """Proxy for document download."""
+    target_url = f"{AI_SERVICE_URL}/kbs/{name}/docs/{file_uuid}/download"
+    try:
+        client = httpx.AsyncClient()
+        req = client.build_request("GET", target_url)
+        r = await client.send(req, stream=True)
+        return StreamingResponse(
+            r.aiter_raw(),
+            status_code=r.status_code,
+            headers=r.headers,
+            background=None
+        )
+    except Exception as e:
+        logger.error(f"Proxy error for download: {e}")
+        raise HTTPException(status_code=500, detail="Document service unavailable")
+

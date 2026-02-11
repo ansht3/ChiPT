@@ -72,23 +72,33 @@ function escapeHtml(text) {
 }
 
 function renderMarkdown(content) {
-    // Parse markdown
-    let html = marked.parse(content);
+    // Configure marked to open links in new tab
+    const renderer = new marked.Renderer();
+    const linkRenderer = renderer.link;
+    renderer.link = (href, title, text) => {
+        const html = linkRenderer.call(renderer, href, title, text);
+        return html.replace(/^<a /, '<a target="_blank" rel="noopener noreferrer" ');
+    };
+
+    // Parse markdown with custom renderer
+    let html = marked.parse(content, { renderer: renderer });
     
     // Create temp element for math rendering
     const temp = document.createElement('div');
     temp.innerHTML = html;
     
     // Render math equations
-    renderMathInElement(temp, {
-        delimiters: [
-            {left: '$$', right: '$$', display: true},
-            {left: '$', right: '$', display: false},
-            {left: '\\[', right: '\\]', display: true},
-            {left: '\\(', right: '\\)', display: false}
-        ],
-        throwOnError: false
-    });
+    if (window.renderMathInElement) {
+        renderMathInElement(temp, {
+            delimiters: [
+                {left: '$$', right: '$$', display: true},
+                {left: '$', right: '$', display: false},
+                {left: '\\[', right: '\\]', display: true},
+                {left: '\\(', right: '\\)', display: false}
+            ],
+            throwOnError: false
+        });
+    }
     
     return temp.innerHTML;
 }
@@ -121,6 +131,20 @@ function showNotification(message, type = 'success') {
 // ============================================================================
 // WebSocket Connection
 // ============================================================================
+
+// Global click listener for links in chat messages (Capture phase)
+document.addEventListener('click', function(e) {
+    // Check if clicked element is a link or inside a link
+    const link = e.target.closest('a');
+    if (link) {
+        // Check if the link is inside a message body
+        if (link.closest('.message-body')) {
+            e.preventDefault();
+            e.stopPropagation();
+            window.open(link.href, '_blank');
+        }
+    }
+}, true);
 
 function connectWebSocket() {
     const token = getToken();

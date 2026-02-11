@@ -11,7 +11,7 @@ from openai import OpenAI
 
 from .milvus_connect import ( 
     _milvus_connect,
-    TEXT_FIELD, TITLE_FIELD, DOCID_FIELD,
+    TEXT_FIELD, TITLE_FIELD, DOCID_FIELD, FILE_UUID_FIELD
 )
 
 from .vector_database_handling import get_kb_path
@@ -41,15 +41,22 @@ SYSTEM_PROMPT = (
 def _approx_tokens(s: str) -> int:
     return max(1, len(s) // 4)
 
-def _build_full_doc_context_from_paths(doc_paths: dict[str, str],
-                                       budget_tokens: int) -> str:
+def _build_full_doc_context_from_paths(doc_infos: dict[str, dict],
+                                       budget_tokens: int, kb_name: str = None) -> str:
     """
     Combines selected documents into one large context chunk to get injected
     into the user message.
     """
+    lines = []
     blocks, used = [], 0
-    for title in doc_paths:
-        txt = _read_file(doc_paths[title]).strip()
+    for title in doc_infos:
+        info = doc_infos[title]
+        path = info.get("path")
+        uuid = info.get("uuid")
+        
+        if not path: continue
+        
+        txt = _read_file(path).strip()
         
         # THE DECISION TREE DOCUMENT WILL BREAK THE CONTEXT GENERATION
         # if title == "decision_tree_handson.md":
@@ -60,7 +67,18 @@ def _build_full_doc_context_from_paths(doc_paths: dict[str, str],
         tlen = _approx_tokens(txt)
         if used + tlen > budget_tokens:
             break
-        blocks.append(f"[{title}]\n{txt}")
+            
+        # Construct header with link if available
+        # Format: [Title](Link) so the AI can copy it, or just providing the Link for the AI to use.
+        # Let's provide it clearly: "Title: ... Link: ... Content: ..."
+        # Or keep the [Title] format but append the link info.
+        header = f"[{title}]"
+        if uuid and kb_name:
+            # We provide the URL so the LLM can create a markdown link: [Title](/kbs/{kb_name}/docs/{uuid}/view)
+            url = f"/kbs/{kb_name}/docs/{uuid}/view"
+            header += f" (Link: {url})"
+            
+        blocks.append(f"{header}\n{txt}")
         used += tlen
     output = "\n\n---\n\n".join(blocks)
     print(f"Number of tokens of full document context:  {_approx_tokens(output)}")
@@ -145,10 +163,10 @@ def _select_topk_docs_weighted(
     return ordered_titles[:k]
 
 
-def _map_doc_to_path(hits: list, wanted_titles: list[str]) -> dict[str, str]:
+def _map_doc_to_info(hits: list, wanted_titles: list[str]) -> dict[str, dict]:
     """
-    Creates a dictionary mapping the k top documents to their paths and
-    returns the dict.
+    Creates a dictionary mapping the k top documents to their paths and UUIDs.
+    Returns {title: {"path": path, "uuid": uuid}}
     """
     out = {t: None for t in wanted_titles}
     wanted = set(wanted_titles)
@@ -157,11 +175,12 @@ def _map_doc_to_path(hits: list, wanted_titles: list[str]) -> dict[str, str]:
         t   = (ent or {}).get(TITLE_FIELD) or "Untitled"
         if t in wanted and out[t] is None:
             p = (ent or {}).get(PATH_FIELD)
+            u = (ent or {}).get(FILE_UUID_FIELD)
             if p:
-                out[t] = p
+                out[t] = {"path": p, "uuid": u}
                 if all(out[v] is not None for v in wanted_titles):
                     break
-    return {t: p for t, p in out.items() if p}
+    return {t: info for t, info in out.items() if info}
 
 def _read_file(path: str) -> str:
     # Safe read function in case file is an incorrect format or is corrupted
@@ -183,7 +202,7 @@ def rag_answer(question: str,
     # 2) ANN: get many chunk candidates
     db_path = get_kb_path(kb_name) if kb_name else None
     conn = _milvus_connect(db_path=db_path); conn.load()
-    hits = conn.search(qvec, top_k=top_n_chunks, output_fields=[TITLE_FIELD, PATH_FIELD, TEXT_FIELD])
+    hits = conn.search(qvec, top_k=top_n_chunks, output_fields=[TITLE_FIELD, PATH_FIELD, TEXT_FIELD, FILE_UUID_FIELD])
     # Count how many chunks per file title in the top results
     file_counts = Counter(hit["entity"].get(TITLE_FIELD, "unknown") for hit in hits if "entity" in hit)
 
@@ -214,26 +233,35 @@ def rag_answer(question: str,
     print("[diag] top_docs:", top_docs)
 
     # 4) map each doc to its absolute path, then load full files
-    doc_paths = _map_doc_to_path(hits, top_docs)
-    print("[diag] doc_paths:", doc_paths)  # should be {title: "/abs/path.md", ...}
-    context = _build_full_doc_context_from_paths(doc_paths, budget_tokens=ctx_budget_tokens)
+    doc_infos = _map_doc_to_info(hits, top_docs)
+    print("[diag] doc_infos:", doc_infos)
+    context = _build_full_doc_context_from_paths(doc_infos, budget_tokens=ctx_budget_tokens, kb_name=kb_name)
     if not context:
         return "Insufficient context to answer from the knowledge base."
 
     # 5) chat
     client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
     print(f"QA context loaded: {qa_context}")
+    
+    instructions = (
+        "Output Rules:\n"
+        "1. Full sentences.\n"
+        "2. When citing a document, use brackets in the link text: `[[Title]](Link)` using the Link provided in the context header.\n"
+        "3. Example: 'The Titanic was found in 1985 [[Titanic.txt]](/kbs/my_kb/docs/uuid/view)'.\n"
+        "4. This ensures the citation is clearly visible as '[Titanic.txt]'."
+    )
+    
     if qa_context:
         user_msg = (
-            f"Context (authoritative; cite using [Title]):\n{context}\n\n"
+            f"Context (authoritative; cite using Markdown links [Title](Link)):\n{context}\n\n"
             f"QA Context:\n{qa_context}\n\n"
-            "Output: Full sentences with inline handles after supported statements."
+            f"{instructions}\n"
             f"Question:\n{question}\n\n"
         )
     else:
         user_msg = (
-            f"Context (authoritative; cite using [Title]):\n{context}\n\n"
-            "Output: Full sentences with inline handles after supported statements."
+            f"Context (authoritative; cite using Markdown links [Title](Link)):\n{context}\n\n"
+            f"{instructions}\n"
             f"Question:\n{question}\n\n"
         )
 
@@ -277,7 +305,7 @@ def rag_answer_stream(
     hits = conn.search(
         qvec,
         top_k=top_n_chunks,
-        output_fields=[TITLE_FIELD, PATH_FIELD, TEXT_FIELD],
+        output_fields=[TITLE_FIELD, PATH_FIELD, TEXT_FIELD, FILE_UUID_FIELD],
     )
 
     # 3) choose K documents by weighted rank+count policy (same as rag_answer)
@@ -290,23 +318,25 @@ def rag_answer_stream(
     print("[diag] top_docs:", top_docs)
 
     # 4) robust doc->path mapping (keeps behavior consistent even if hit type changes)
-    doc_paths = {}
+    doc_infos = {}
     wanted = set(top_docs)
     for h in hits:
         ent = _ent(h)
         t = ent.get(TITLE_FIELD) or "Untitled"
-        if t in wanted and t not in doc_paths:
+        if t in wanted and t not in doc_infos:
             p = ent.get(PATH_FIELD)
+            u = ent.get(FILE_UUID_FIELD)
             if p:
-                doc_paths[t] = p
-                if len(doc_paths) == len(top_docs):
+                doc_infos[t] = {"path": p, "uuid": u}
+                if len(doc_infos) == len(top_docs):
                     break
 
-    print("[diag] doc_paths:", doc_paths)
+    print("[diag] doc_infos:", doc_infos)
 
     context = _build_full_doc_context_from_paths(
-        doc_paths,
+        doc_infos,
         budget_tokens=ctx_budget_tokens,
+        kb_name=kb_name
     )
 
     if not context:
@@ -314,10 +344,18 @@ def rag_answer_stream(
         yield f"data: {json.dumps({'choices':[{'delta':{'content': msg}}]})}\n\n"
         return
 
+    instructions = (
+        "Output Rules:\n"
+        "1. Full sentences.\n"
+        "2. When citing a document, use brackets in the link text: `[[Title]](Link)` using the Link provided in the context header.\n"
+        "3. Example: 'The Titanic was found in 1985 [[Titanic.txt]](/kbs/my_kb/docs/uuid/view)'.\n"
+        "4. This ensures the citation is clearly visible as '[Titanic.txt]'."
+    )
+
     # 5) chat (same prompt as rag_answer)
     user_msg = (
-        f"Context (authoritative; cite using [Title]):\n{context}\n\n"
-        "Output: Full sentences with inline handles after supported statements."
+        f"Context (authoritative; cite using Markdown links [Title](Link)):\n{context}\n\n"
+        f"{instructions}\n"
         f"Question:\n{question}\n\n"
     )
 
@@ -349,10 +387,10 @@ def rag_answer_stream(question: str):
     # build messages etc (same as rag_answer)
     qvec = _embed_query(question)
     conn = _milvus_connect(); conn.load()
-    hits = conn.search(qvec, top_k=50, output_fields=[TITLE_FIELD, PATH_FIELD, TEXT_FIELD])
+    hits = conn.search(qvec, top_k=50, output_fields=[TITLE_FIELD, PATH_FIELD, TEXT_FIELD, FILE_UUID_FIELD])
     top_docs = _select_topk_docs_by_first_hit(hits, 5)
-    doc_paths = _map_doc_to_path(hits, top_docs)
-    context = _build_full_doc_context_from_paths(doc_paths, budget_tokens=40000)
+    doc_infos = _map_doc_to_info(hits, top_docs)
+    context = _build_full_doc_context_from_paths(doc_infos, budget_tokens=40000)
 
     user_msg = (
         f"Context:\n{context}\n\n"

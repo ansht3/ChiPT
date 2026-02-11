@@ -4,6 +4,7 @@ import shutil
 import logging
 import time
 import glob
+import uuid
 from typing import List, Dict, Optional, Tuple
 import tiktoken
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -38,6 +39,7 @@ TITLE_FIELD = "title"
 DOCID_FIELD = "doc_id"
 PATH_FIELD = "path"
 SOURCE_FILE_FIELD = "source_file" # New field for tracking original file
+FILE_UUID_FIELD = "file_uuid" # New field for stable citation linking
 
 class VectorDatabaseManager:
     def __init__(self, db_path: str, collection_name: str = COLLECTION_NAME_DEFAULT):
@@ -119,6 +121,7 @@ class VectorDatabaseManager:
         schema.add_field(field_name=TEXT_FIELD, datatype=DataType.VARCHAR, max_length=20000) # Increased limit slightly
         schema.add_field(field_name=PATH_FIELD, datatype=DataType.VARCHAR, max_length=1024)
         schema.add_field(field_name=SOURCE_FILE_FIELD, datatype=DataType.VARCHAR, max_length=1024) # New field
+        schema.add_field(field_name=FILE_UUID_FIELD, datatype=DataType.VARCHAR, max_length=128) # New field for UUID
         schema.add_field(field_name=VEC_FIELD, datatype=DataType.FLOAT_VECTOR, dim=4096) 
 
         # Create index params
@@ -269,6 +272,9 @@ class VectorDatabaseManager:
             # Verify paths are absolute
             resulting_paths = [os.path.abspath(p) for p in resulting_paths]
             
+            # Generate UUID for this file (source file)
+            file_uuid = str(uuid.uuid4())
+            
             # Map original file (input arg) to the actual files being inserted
             # We store the ORIGINAL file path in the 'source_file' field
             # So we can delete all chunks related to 'fp' later
@@ -276,6 +282,7 @@ class VectorDatabaseManager:
                 final_files_to_process.append({
                     "process_path": p,
                     "source_path": os.path.abspath(fp),
+                    "file_uuid": file_uuid,
                     "is_split": len(resulting_paths) > 1
                 })
 
@@ -292,6 +299,7 @@ class VectorDatabaseManager:
         for item in tqdm(final_files_to_process, desc="Processing files"):
             fpath = item["process_path"]
             source_path = item["source_path"]
+            file_uuid = item["file_uuid"]
             
             logger.info(f"Processing {fpath}...")
             
@@ -319,6 +327,7 @@ class VectorDatabaseManager:
                         TEXT_FIELD: text,
                         PATH_FIELD: fpath, # Point to the actual file (split or original)
                         SOURCE_FILE_FIELD: source_path, # Critical for deletion
+                        FILE_UUID_FIELD: file_uuid, # Stable citation link
                         VEC_FIELD: embeddings[i]
                     })
 
@@ -401,6 +410,22 @@ class VectorDatabaseManager:
                 sources.add(res[SOURCE_FILE_FIELD])
                 
         return list(sources)
+
+    def get_file_path_by_uuid(self, file_uuid: str) -> Optional[str]:
+        """Look up the source file path for a given UUID."""
+        if not self.client:
+            self.connect()
+            
+        results = self.client.query(
+            collection_name=self.collection_name,
+            filter=f'{FILE_UUID_FIELD} == "{file_uuid}"',
+            output_fields=[SOURCE_FILE_FIELD],
+            limit=1
+        )
+        
+        if results:
+            return results[0].get(SOURCE_FILE_FIELD)
+        return None
 
 def list_knowledge_bases() -> List[str]:
     """List available knowledge bases in the DATA_DIR."""

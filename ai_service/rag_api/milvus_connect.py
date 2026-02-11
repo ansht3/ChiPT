@@ -37,6 +37,7 @@ VEC_FIELD   = os.environ.get("MILVUS_VECTOR_FIELD", "embedding")
 TEXT_FIELD  = os.environ.get("MILVUS_TEXT_FIELD", "text")
 TITLE_FIELD = os.environ.get("MILVUS_TITLE_FIELD", "title")
 DOCID_FIELD = os.environ.get("MILVUS_DOCID_FIELD", "doc_id")
+FILE_UUID_FIELD = os.environ.get("MILVUS_FILE_UUID_FIELD", "file_uuid")
 
 # ---- Process management (optional, for lock detection) ----
 try:

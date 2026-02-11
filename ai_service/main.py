@@ -3,6 +3,7 @@ AI Answer Generation Service
 Connects to OpenAI API to generate answers with context
 """
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
 import httpx
@@ -20,7 +21,10 @@ from rag_api.vector_database_handling import (
     create_kb_dir, 
     get_kb_path, 
     list_knowledge_bases,
-    COLLECTION_NAME_DEFAULT
+    get_kb_path, 
+    list_knowledge_bases,
+    COLLECTION_NAME_DEFAULT,
+    FILE_UUID_FIELD
 )
 from config import OPENAI_BASE_URL, OPENAI_API_KEY, CHAT_COMPLETION_MODEL
 
@@ -278,6 +282,377 @@ async def delete_file_from_kb(name: str, request: KBFileDeleteRequest):
         return {"message": f"File '{request.filename}' removed from KB '{name}'"}
     except Exception as e:
         logger.error(f"Error removing file from KB: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/kbs/{name}/docs/{file_uuid}")
+async def get_kb_document(name: str, file_uuid: str):
+    logger.info(f"Attempting to retrieve document: KB='{name}', UUID='{file_uuid}'")
+    try:
+        db_path = get_kb_path(name)
+        logger.info(f"Resolved DB path: {db_path}")
+        
+        manager = VectorDatabaseManager(db_path, collection_name=COLLECTION_NAME_DEFAULT)
+        
+        source_path = manager.get_file_path_by_uuid(file_uuid)
+        logger.info(f"Resolved source path from DB: {source_path}")
+        
+        if not source_path:
+             logger.error(f"UUID '{file_uuid}' not found in DB '{name}'")
+             raise HTTPException(status_code=404, detail="Document UUID not found in database")
+             
+        if not os.path.exists(source_path):
+            logger.error(f"File not found on disk: {source_path}")
+            # Fallback: check if it's in the KB directory
+            kb_dir = os.path.dirname(db_path)
+            potential_path = os.path.join(kb_dir, os.path.basename(source_path))
+            logger.info(f"Checking fallback path: {potential_path}")
+            if os.path.exists(potential_path):
+                source_path = potential_path
+                logger.info(f"Found at fallback path: {source_path}")
+            else:
+                raise HTTPException(status_code=404, detail=f"Document file not found: {source_path}")
+            
+        return FileResponse(source_path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieval document: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/kbs/{name}/docs/{file_uuid}/view")
+async def get_kb_document_view(name: str, file_uuid: str):
+    print(f"DEBUG: Viewing document: KB='{name}', UUID='{file_uuid}'")
+    try:
+        db_path = get_kb_path(name)
+        print(f"DEBUG: DB Path: {db_path}")
+        
+        manager = VectorDatabaseManager(db_path, collection_name=COLLECTION_NAME_DEFAULT)
+        
+        source_path = manager.get_file_path_by_uuid(file_uuid)
+        print(f"DEBUG: Resolved source path: {source_path}")
+        
+        if not source_path:
+             print("DEBUG: UUID not found in DB")
+             raise HTTPException(status_code=404, detail="Document UUID not found")
+             
+        if not os.path.exists(source_path):
+             print(f"DEBUG: File not found at {source_path}")
+             # Try fallback
+             kb_dir = os.path.dirname(db_path)
+             potential_path = os.path.join(kb_dir, os.path.basename(source_path))
+             print(f"DEBUG: Checking fallback: {potential_path}")
+             
+             if os.path.exists(potential_path):
+                 source_path = potential_path
+                 print(f"DEBUG: Found at fallback: {source_path}")
+             else:
+                 print("DEBUG: Fallback failed")
+                 raise HTTPException(status_code=404, detail="File not found")
+
+        # Read content
+        content = ""
+        try:
+             with open(source_path, "r", encoding="utf-8", errors="replace") as f:
+                 content = f.read()
+        except Exception as e:
+             content = f"Error reading file: {e}"
+        
+        # Simple HTML wrapper with Markdown support and App Styling
+        import json
+        json_content = json.dumps(content)
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Document View - {{os.path.basename(source_path)}}</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            
+            <!-- Fonts -->
+            <link rel="preconnect" href="https://fonts.googleapis.com">
+            <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+            <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;600;700&family=JetBrains+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+            
+            <!-- Tailwind (for utility classes if needed, but we'll use custom CSS to keep it self-contained) -->
+            <script src="https://cdn.tailwindcss.com"></script>
+
+            <!-- Markdown -->
+            <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css/github-markdown.min.css">
+            
+            <!-- KaTeX for Math -->
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+            <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+            <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+            
+            <style>
+                :root {{
+                    --primary: #2D5A7B;
+                    --primary-dark: #1E3A52;
+                    --accent: #E8915C;
+                    --bg-main: #FAFAF8;
+                    --bg-panel: #FFFFFF;
+                    --text-primary: #1A1A1A;
+                    --text-secondary: #6B7280;
+                    --border: #E5E7EB;
+                }}
+
+                body {{
+                    font-family: 'DM Sans', -apple-system, sans-serif;
+                    background-color: var(--bg-main);
+                    color: var(--text-primary);
+                    margin: 0;
+                    padding: 0;
+                    min-height: 100vh;
+                }}
+
+                .glass-panel {{
+                    background: rgba(255, 255, 255, 0.9);
+                    backdrop-filter: blur(10px);
+                    border-bottom: 1px solid rgba(229, 231, 235, 0.5);
+                }}
+
+                .navbar {{
+                    position: sticky;
+                    top: 0;
+                    z-index: 50;
+                    padding: 1rem 1.5rem;
+                }}
+
+                .nav-content {{
+                    max-width: 900px;
+                    margin: 0 auto;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }}
+
+                .logo {{
+                    font-family: 'Crimson Pro', serif;
+                    font-weight: 700;
+                    font-size: 1.5rem;
+                    background: linear-gradient(135deg, var(--primary), var(--accent));
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                }}
+
+                .main-container {{
+                    max-width: 900px;
+                    margin: 2rem auto;
+                    padding: 0 1.5rem;
+                }}
+
+                .document-card {{
+                    background: var(--bg-panel);
+                    border-radius: 16px;
+                    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+                    overflow: hidden;
+                    border: 1px solid var(--border);
+                }}
+
+                .doc-header {{
+                    background: #f8fafc;
+                    padding: 1.5rem 2rem;
+                    border-bottom: 1px solid var(--border);
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }}
+
+                .doc-title {{
+                    font-family: 'Crimson Pro', serif;
+                    font-size: 1.25rem;
+                    font-weight: 600;
+                    color: var(--primary-dark);
+                    display: flex;
+                    align-items: center;
+                    gap: 0.5rem;
+                }}
+
+                .download-btn {{
+                    background-color: var(--primary);
+                    color: white;
+                    padding: 0.5rem 1rem;
+                    border-radius: 8px;
+                    text-decoration: none;
+                    font-weight: 500;
+                    font-size: 0.875rem;
+                    transition: all 0.2s;
+                    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+                }}
+
+                .download-btn:hover {{
+                    background-color: var(--primary-dark);
+                    transform: translateY(-1px);
+                }}
+
+                .markdown-body {{
+                    padding: 3rem;
+                    background: transparent;
+                    font-family: 'DM Sans', sans-serif;
+                    color: var(--text-primary);
+                }}
+                
+                /* Styled Tables - Force Light Theme Overrides */
+                .markdown-body table {{
+                    border-collapse: collapse;
+                    width: 100%;
+                    margin: 1em 0;
+                    border-radius: 8px;
+                    overflow: hidden;
+                    box-shadow: 0 0 0 1px var(--border);
+                    background-color: #ffffff !important;
+                }}
+                
+                .markdown-body table th {{
+                    background-color: #f8fafc !important;
+                    color: var(--text-primary) !important;
+                    font-weight: 600;
+                    text-align: left;
+                    padding: 0.75rem 1rem;
+                    border-bottom: 1px solid var(--border) !important;
+                    border-top: none !important;
+                }}
+                
+                .markdown-body table td {{
+                    padding: 0.75rem 1rem;
+                    border-bottom: 1px solid var(--border) !important;
+                    border-top: none !important;
+                    color: var(--text-primary) !important;
+                    background-color: #ffffff !important;
+                }}
+                
+                .markdown-body table tr {{
+                    background-color: #ffffff !important;
+                }}
+                
+                .markdown-body table tr:nth-child(even) td {{
+                    background-color: #f8fafc !important;
+                }}
+                
+                 .markdown-body table tr:nth-child(even) {{
+                    background-color: #f8fafc !important;
+                }}
+
+                /* Styled Code Blocks */
+                .markdown-body pre {{
+                    background-color: #1e293b !important; /* Dark slate */
+                    border-radius: 8px;
+                    padding: 1rem;
+                    color: #e2e8f0;
+                    overflow-x: auto;
+                    margin-bottom: 1rem;
+                }}
+
+                .markdown-body code {{
+                    font-family: 'JetBrains Mono', monospace;
+                    font-size: 0.9em;
+                }}
+                
+                .markdown-body p code, .markdown-body li code, .markdown-body table code {{
+                    background-color: rgba(0,0,0,0.05);
+                    padding: 0.2em 0.4em;
+                    border-radius: 4px;
+                    color: var(--text-primary);
+                }}
+                
+                .markdown-body pre code {{
+                    background-color: transparent;
+                    padding: 0;
+                    color: inherit;
+                    white-space: pre;
+                }}
+
+                /* Override headers */
+                .markdown-body h1, .markdown-body h2, .markdown-body h3 {{
+                    font-family: 'Crimson Pro', serif;
+                    border-bottom-color: var(--border);
+                    color: var(--primary-dark);
+                }}
+            </style>
+        </head>
+        <body>
+            <!-- Navbar -->
+            <nav class="navbar glass-panel">
+                <div class="nav-content">
+                    <div class="logo">ChiPT</div>
+                    <div style="font-size: 0.875rem; color: var(--text-secondary);">Document Viewer</div>
+                </div>
+            </nav>
+
+            <div class="main-container">
+                <div class="document-card">
+                    <div class="doc-header">
+                        <div class="doc-title">
+                            <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
+                            </svg>
+                            {os.path.basename(source_path)}
+                        </div>
+                        <a href="/kbs/{name}/docs/{file_uuid}/download" class="download-btn">
+                            Download Raw
+                        </a>
+                    </div>
+                    <div id="content" class="markdown-body"></div>
+                </div>
+            </div>
+
+            <script>
+                const rawContent = {json_content};
+                // Configure marked options
+                marked.use({{
+                    breaks: true,
+                    gfm: true
+                }});
+                
+                // Simple pre-processor to protect math from marked
+                const originalParse = marked.parse;
+                marked.parse = function(text) {{
+                    // No-op protection: simple replacement might be risky without robust regex.
+                    // For now, let's trust marked + correct delimiters, but if needed we can add protection here.
+                    return originalParse(text);
+                }};
+
+                document.getElementById('content').innerHTML = marked.parse(rawContent);
+
+                // Render KaTeX
+                renderMathInElement(document.getElementById('content'), {{
+                    delimiters: [
+                        {{left: '$$', right: '$$', display: true}},
+                        {{left: '$', right: '$', display: false}},
+                        {{left: '\\\\(', right: '\\\\)', display: false}},
+                        {{left: '\\\\[', right: '\\\\]', display: true}}
+                    ],
+                    throwOnError: false
+                }});
+            </script>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=html_content)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"DEBUG: Exception: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/kbs/{name}/docs/{file_uuid}/download")
+async def download_kb_document(name: str, file_uuid: str):
+    """Download a document file."""
+    try:
+        db_path = get_kb_path(name)
+        manager = VectorDatabaseManager(db_path, collection_name=COLLECTION_NAME_DEFAULT)
+        
+        source_path = manager.get_file_path_by_uuid(file_uuid)
+        if not source_path or not os.path.exists(source_path):
+            raise HTTPException(status_code=404, detail="Document not found")
+            
+        return FileResponse(source_path, filename=os.path.basename(source_path))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading document: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
