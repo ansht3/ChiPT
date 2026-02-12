@@ -2,3 +2,9 @@
 .env*
 ChiPT.tar.gz
 ChiPT.zip
+
+# large archives
+ChiPT.tar.gz
+ChiPT.zip
+*.tar.gz
+*.zip
