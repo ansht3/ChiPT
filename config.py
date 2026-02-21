@@ -2,8 +2,10 @@
 import os
 from dotenv import load_dotenv
 
-# Load .env file
-load_dotenv()
+# Load .env file explicitly from the same directory as this file, and override any existing env vars
+current_dir = os.path.dirname(os.path.abspath(__file__))
+dotenv_path = os.path.join(current_dir, '.env')
+load_dotenv(dotenv_path, override=True)
 
 # -----------------------------
 # Shared Milvus Configuration
