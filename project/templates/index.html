@@ -510,6 +510,30 @@
             text-decoration: underline;
         }
 
+        .citation-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2px 8px;
+            margin: 0 2px;
+            background-color: rgba(45, 90, 123, 0.1);
+            color: var(--primary) !important;
+            border-radius: 9999px;
+            font-size: 0.85em;
+            font-weight: 500;
+            text-decoration: none !important;
+            transition: all 0.2s ease;
+            border: 1px solid rgba(45, 90, 123, 0.2);
+        }
+
+        .citation-link:hover {
+            background-color: var(--primary);
+            color: white !important;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 4px rgba(45, 90, 123, 0.2);
+            border-color: var(--primary);
+        }
+
         .message-body .markdown-content table {
             border-collapse: collapse;
             width: 100%;
@@ -775,12 +799,12 @@
                         <!-- Drag & Drop Zone -->
                         <div class="p-6 bg-white border-b">
                             <div id="drop-zone" class="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center transition-all cursor-pointer hover:border-primary hover:bg-blue-50">
-                                <input type="file" id="file-upload" class="hidden" multiple accept=".txt,.md">
+                                <input type="file" id="file-upload" class="hidden" multiple accept=".txt,.md,.pdf">
                                 <svg class="w-10 h-10 text-gray-400 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
                                 </svg>
                                 <p class="font-medium text-gray-700 mb-1">Click to upload or drag and drop</p>
-                                <p class="text-xs text-secondary">Supported files: .txt, .md</p>
+                                <p class="text-xs text-secondary">Supported files: .txt, .md, .pdf</p>
                             </div>
 
                             <!-- Upload Status List (Existing KB) -->
@@ -818,6 +842,6 @@
     <!-- Markdown rendering (already included at top) -->
     
     <!-- Main App Logic -->
-    <script src="/static/app.js?v=2"></script>
+    <script src="/static/app.js?v=6"></script>
 </body>
 </html>

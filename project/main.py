@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="ChiPT Q&A System", lifespan=lifespan)
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 templates = Jinja2Templates(directory="templates")
 
 
@@ -561,5 +561,23 @@ async def proxy_download_kb_document(name: str, file_uuid: str):
         )
     except Exception as e:
         logger.error(f"Proxy error for download: {e}")
+        raise HTTPException(status_code=500, detail="Document service unavailable")
+
+@app.get("/kbs/{name}/docs/{file_uuid}/inline")
+async def proxy_inline_kb_document(name: str, file_uuid: str):
+    """Proxy for inline document viewing."""
+    target_url = f"{AI_SERVICE_URL}/kbs/{name}/docs/{file_uuid}/inline"
+    try:
+        client = httpx.AsyncClient()
+        req = client.build_request("GET", target_url)
+        r = await client.send(req, stream=True)
+        return StreamingResponse(
+            r.aiter_raw(),
+            status_code=r.status_code,
+            headers=r.headers,
+            background=None
+        )
+    except Exception as e:
+        logger.error(f"Proxy error for inline view: {e}")
         raise HTTPException(status_code=500, detail="Document service unavailable")
 

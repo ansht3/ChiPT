@@ -246,9 +246,13 @@ def rag_answer(question: str,
     instructions = (
         "Output Rules:\n"
         "1. Full sentences.\n"
-        "2. When citing a document, use brackets in the link text: `[[Title]](Link)` using the Link provided in the context header.\n"
-        "3. Example: 'The Titanic was found in 1985 [[Titanic.txt]](/kbs/my_kb/docs/uuid/view)'.\n"
-        "4. This ensures the citation is clearly visible as '[Titanic.txt]'."
+        "2. When citing a document, use standard markdown link format: `[Title](Link)` using the Link provided in the context header.\n"
+        "3. DO NOT use brackets like 【Title】. ONLY use `[Title](Link)`.\n"
+        "4. Example: 'The Titanic was found in 1985 [Titanic.txt](/kbs/my_kb/docs/uuid/view)'.\n"
+        "5. This ensures the citation is clearly visible as linked text.\n"
+        "6. Use LaTeX for all mathematical expressions.\n"
+        "7. Use `$$` delimiters for display math (separate lines).\n"
+        "8. Use `$` delimiters for inline math."
     )
     
     if qa_context:
@@ -347,9 +351,13 @@ def rag_answer_stream(
     instructions = (
         "Output Rules:\n"
         "1. Full sentences.\n"
-        "2. When citing a document, use brackets in the link text: `[[Title]](Link)` using the Link provided in the context header.\n"
-        "3. Example: 'The Titanic was found in 1985 [[Titanic.txt]](/kbs/my_kb/docs/uuid/view)'.\n"
-        "4. This ensures the citation is clearly visible as '[Titanic.txt]'."
+        "2. When citing a document, use standard markdown link format: `[Title](Link)` using the Link provided in the context header.\n"
+        "3. DO NOT use brackets like 【Title】. ONLY use `[Title](Link)`.\n"
+        "4. Example: 'The Titanic was found in 1985 [Titanic.txt](/kbs/my_kb/docs/uuid/view)'.\n"
+        "5. This ensures the citation is clearly visible as linked text.\n"
+        "6. Use LaTeX for all mathematical expressions.\n"
+        "7. Use `$$` delimiters for display math (separate lines).\n"
+        "8. Use `$` delimiters for inline math."
     )
 
     # 5) chat (same prompt as rag_answer)

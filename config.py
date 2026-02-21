@@ -54,4 +54,4 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./qa_system.db")
 # Other Services
 # -----------------------------
 MAIN_QA_URL = os.getenv("MAIN_QA_URL", "http://localhost:8000")
-AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://localhost:8901")
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://127.0.0.1:8901")

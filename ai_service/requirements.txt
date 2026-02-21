@@ -14,3 +14,9 @@ langchain-core>=0.3.31
 python-dotenv>=1.0.0
 
 git+https://github.com/brandonstarxel/chunking_evaluation.git
+marker-pdf==1.3.1
+pdfplumber
+pymupdf
+torch
+
+transformers==4.45.2

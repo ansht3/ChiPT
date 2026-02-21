@@ -72,29 +72,80 @@ function escapeHtml(text) {
 }
 
 function renderMarkdown(content) {
-    // Configure marked to open links in new tab
+    // 1. Protect Math: Replace $...$ and $$...$$ with placeholders
+    // We use a specific placeholder format that marked() won't touch.
+    const mathBlocks = [];
+    
+    // Regex for:
+    // 1. Display math $$...$$
+    // 2. Display math \[...\] (standard LaTeX)
+    // 3. Inline math \(...\) (standard LaTeX)
+    // 4. Inline math $...$
+    // 5. Display math [ ... ] (variant sometimes seen, ensure it contains backslash to avoid false positives with links)
+    
+    // We use a replacer function to handle them all.
+    // Order matters! Display math first.
+    
+    // Regex explanation:
+    // \$\$([\s\S]*?)\$\$ -> $$ ... $$
+    // \\\[([\s\S]*?)\\\] -> \[ ... \]  (literal \[ ... \])
+    // \\\(([\s\S]*?)\\\) -> \( ... \)  (literal \( ... \))
+    // \$([^$\n]*?)\$     -> $ ... $    (inline, no newlines usually, but avoiding double match)
+    // \[(\s*\\[\s\S]*?)\] -> [ ... ]    (brackets containing a backslash command roughly)
+    
+    const regex = /\$\$([\s\S]*?)\$\$|\\\[([\s\S]*?)\\\]|\[(\s*\\[\s\S]*?)\]|\\\(([\s\S]*?)\\\)|\$([^$\n]*?)\$/g;
+    
+    let protectedContent = content.replace(regex, function(match, m1, m2, m3, m4, m5) {
+        const id = `MATH_BLOCK_${mathBlocks.length}`;
+        // Normalize to $$...$$ or $...$ depending on the match type
+        // m1: $$...$$ content
+        // m2: \[...\] content
+        // m3: [ ... ] content (our special case)
+        // m4: \(...\) content
+        // m5: $...$ content
+        
+        // We want to store the *normalized* version for restoration
+        if (m1 !== undefined) mathBlocks.push(`$$${m1}$$`); // Already $$
+        else if (m2 !== undefined) mathBlocks.push(`$$${m2}$$`); // Convert \[ to $$
+        else if (m3 !== undefined) mathBlocks.push(`$$${m3}$$`); // Convert [ ] with backslash to $$
+        else if (m4 !== undefined) mathBlocks.push(`$${m4}$`);  // Convert \( to $
+        else if (m5 !== undefined) mathBlocks.push(`$${m5}$`);  // Already $
+        else mathBlocks.push(match); // Fallback
+        
+        return id;
+    });
+
+    // 2. Configure marked
     const renderer = new marked.Renderer();
     const linkRenderer = renderer.link;
     renderer.link = (href, title, text) => {
         const html = linkRenderer.call(renderer, href, title, text);
-        return html.replace(/^<a /, '<a target="_blank" rel="noopener noreferrer" ');
+        // Replace <a with the styled version. Use /<a / instad of /^<a / to be safer against whitespace or unexpected prefixes
+        const newHtml = html.replace(/<a /, '<a target="_blank" rel="noopener noreferrer" class="citation-link" ');
+        return newHtml;
     };
 
-    // Parse markdown with custom renderer
-    let html = marked.parse(content, { renderer: renderer });
+    // 3. Parse markdown
+    let html = marked.parse(protectedContent, { renderer: renderer });
     
-    // Create temp element for math rendering
+    // 4. Restore Math
+    mathBlocks.forEach((match, index) => {
+        const id = `MATH_BLOCK_${index}`;
+        html = html.replace(id, match);
+    });
+    
+    // 5. Create temp element for math rendering
     const temp = document.createElement('div');
     temp.innerHTML = html;
     
-    // Render math equations
+    // 6. Render math equations
     if (window.renderMathInElement) {
         renderMathInElement(temp, {
             delimiters: [
                 {left: '$$', right: '$$', display: true},
                 {left: '$', right: '$', display: false},
-                {left: '\\[', right: '\\]', display: true},
-                {left: '\\(', right: '\\)', display: false}
+                {left: '\\(', right: '\\)', display: false},
+                {left: '\\[', right: '\\]', display: true}
             ],
             throwOnError: false
         });
@@ -137,6 +188,14 @@ document.addEventListener('click', function(e) {
     // Check if clicked element is a link or inside a link
     const link = e.target.closest('a');
     if (link) {
+        // Special handling for citation links - always open in new tab and stop propagation
+        if (link.classList.contains('citation-link')) {
+            e.preventDefault();
+            e.stopPropagation();
+            window.open(link.href, '_blank');
+            return;
+        }
+
         // Check if the link is inside a message body
         if (link.closest('.message-body')) {
             e.preventDefault();
@@ -477,7 +536,7 @@ function renderQuestionDetail(question) {
                 
                 <div class="prose max-w-none">
                     <h3 class="text-xl font-bold serif text-gray-900 mb-3">Question</h3>
-                    <div class="text-gray-800 leading-relaxed">${escapeHtml(question.content)}</div>
+                    <div class="text-gray-800 leading-relaxed markdown-content">${renderMarkdown(question.content)}</div>
                 </div>
             </div>
             
@@ -884,12 +943,12 @@ function showCreateKbModal() {
                 <div class="mb-6">
                     <label class="block text-sm font-semibold text-gray-700 mb-2">Initial Documents (Optional)</label>
                     <div class="border-2 border-dashed border-gray-300 rounded-lg p-4 text-center cursor-pointer hover:border-primary hover:bg-gray-50 transition-colors" onclick="document.getElementById('create-kb-files').click()">
-                        <input type="file" id="create-kb-files" multiple accept=".txt,.md" class="hidden">
+                        <input type="file" id="create-kb-files" multiple accept=".txt,.md,.pdf" class="hidden">
                         <svg class="w-8 h-8 text-gray-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
                         </svg>
                         <p class="text-sm text-gray-600 font-medium">Click to select files</p>
-                        <p class="text-xs text-gray-500">.txt or .md</p>
+                        <p class="text-xs text-gray-500">.txt, .md, or .pdf</p>
                         <div id="selected-files-count" class="text-xs text-primary font-medium mt-2 hidden"></div>
                     </div>
                 </div>
@@ -1274,11 +1333,11 @@ function setupDragAndDrop(kbName) {
     
     async function handleFiles(files) {
         const validFiles = [...files].filter(file => 
-            file.name.endsWith('.txt') || file.name.endsWith('.md')
+            file.name.endsWith('.txt') || file.name.endsWith('.md') || file.name.endsWith('.pdf')
         );
         
         if (validFiles.length === 0) {
-            showNotification('Only .txt and .md files are supported', 'error');
+            showNotification('Only .txt, .md, and .pdf files are supported', 'error');
             return;
         }
 

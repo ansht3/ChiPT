@@ -15,6 +15,11 @@ from openai import OpenAI
 from chromadb.utils import embedding_functions
 from chunking_evaluation.chunking import ClusterSemanticChunker
 from tqdm import tqdm
+try:
+    from .pdf_utils import extract_text_marker
+except ImportError:
+    # Handle case where it's run as script
+    from pdf_utils import extract_text_marker
 
 # Configure logging
 logging.basicConfig(
@@ -266,8 +271,26 @@ class VectorDatabaseManager:
                 logger.info(f"Skipping {file_name} (already exists in KB).")
                 continue
 
+            # Handle PDF Conversion
+            processing_path = fp
+            if fp.lower().endswith('.pdf'):
+                logger.info(f"Converting PDF to Markdown: {fp}")
+                md_text = extract_text_marker(fp)
+                if not md_text:
+                    logger.warning(f"Failed to extract text from {fp}")
+                    continue
+                
+                # Save markdown
+                md_filename = os.path.splitext(file_name)[0] + ".md"
+                md_path = os.path.join(self.processed_docs_dir, md_filename)
+                with open(md_path, 'w', encoding='utf-8') as f:
+                    f.write(md_text)
+                
+                processing_path = md_path
+                logger.info(f"Saved converted markdown to {processing_path}")
+
             # This returns either [original_path] or [split_path_1, split_path_2, ...]
-            resulting_paths = self._split_large_file(fp)
+            resulting_paths = self._split_large_file(processing_path)
             
             # Verify paths are absolute
             resulting_paths = [os.path.abspath(p) for p in resulting_paths]

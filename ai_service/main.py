@@ -230,8 +230,8 @@ async def get_kb_details(name: str):
 async def upload_file_to_kb(name: str, file: UploadFile = File(...)):
     """Upload a file to a knowledge base."""
     # check valid file extension
-    if not (file.filename.endswith(".txt") or file.filename.endswith(".md")):
-         raise HTTPException(status_code=400, detail="Only .txt and .md files are supported")
+    if not (file.filename.endswith(".txt") or file.filename.endswith(".md") or file.filename.endswith(".pdf")):
+         raise HTTPException(status_code=400, detail="Only .txt, .md, and .pdf files are supported")
 
     try:
         # Verify KB exists
@@ -349,6 +349,155 @@ async def get_kb_document_view(name: str, file_uuid: str):
                  print("DEBUG: Fallback failed")
                  raise HTTPException(status_code=404, detail="File not found")
 
+        # Check for PDF
+        # Check for PDF
+        if source_path.lower().endswith('.pdf'):
+             download_url = f"/kbs/{name}/docs/{file_uuid}/download"
+             inline_url = f"/kbs/{name}/docs/{file_uuid}/inline"
+             # Use the same styling as the markdown view but with an iframe
+             html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Document View - {os.path.basename(source_path)}</title>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+                <style>
+                    :root {{
+                        --primary: #2D5A7B;
+                        --primary-dark: #1E3A52;
+                        --accent: #E8915C;
+                        --bg-main: #FAFAF8;
+                        --bg-panel: #FFFFFF;
+                        --text-primary: #1A1A1A;
+                        --text-secondary: #6B7280;
+                        --border: #E5E7EB;
+                    }}
+    
+                    body {{
+                        font-family: 'DM Sans', sans-serif;
+                        line-height: 1.6;
+                        color: var(--text-primary);
+                        background-color: var(--bg-main);
+                        margin: 0;
+                        padding: 0;
+                        height: 100vh;
+                        display: flex;
+                        flex-direction: column;
+                    }}
+    
+                    .navbar {{
+                        background: rgba(255, 255, 255, 0.8);
+                        backdrop-filter: blur(12px);
+                        border-bottom: 1px solid var(--border);
+                        padding: 1rem 2rem;
+                        position: sticky;
+                        top: 0;
+                        z-index: 100;
+                    }}
+    
+                    .nav-content {{
+                        max-width: 1200px;
+                        margin: 0 auto;
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                    }}
+    
+                    .logo {{
+                        font-family: 'Crimson Pro', serif;
+                        font-size: 1.5rem;
+                        font-weight: 700;
+                        color: var(--primary-dark);
+                        text-decoration: none;
+                    }}
+    
+                    .main-container {{
+                        flex: 1;
+                        padding: 2rem;
+                        max-width: 1200px;
+                        margin: 0 auto;
+                        width: 100%;
+                        box-sizing: border-box;
+                        display: flex;
+                        flex-direction: column;
+                    }}
+    
+                    .document-card {{
+                        background: var(--bg-panel);
+                        border-radius: 16px;
+                        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+                        border: 1px solid var(--border);
+                        display: flex;
+                        flex-direction: column;
+                        flex-grow: 1;
+                        overflow: hidden;
+                    }}
+    
+                    .doc-header {{
+                        padding: 1.5rem 2rem;
+                        border-bottom: 1px solid var(--border);
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        background: #FAFAF8;
+                    }}
+    
+                    .doc-title {{
+                        font-family: 'Crimson Pro', serif;
+                        font-size: 1.25rem;
+                        font-weight: 600;
+                        color: var(--primary-dark);
+                        display: flex;
+                        align-items: center;
+                        gap: 0.5rem;
+                    }}
+    
+                    .download-btn {{
+                        background-color: var(--primary);
+                        color: white;
+                        padding: 0.4rem 0.8rem;
+                        border-radius: 6px;
+                        text-decoration: none;
+                        font-weight: 500;
+                        font-size: 0.875rem;
+                    }}
+    
+                    iframe {{
+                        flex-grow: 1;
+                        width: 100%;
+                        border: none;
+                    }}
+                </style>
+            </head>
+            <body>
+                <nav class="navbar glass-panel">
+                    <div class="nav-content">
+                        <div class="logo">ChiPT</div>
+                        <div style="font-size: 0.875rem; color: var(--text-secondary);">Document Viewer</div>
+                    </div>
+                </nav>
+    
+                <div class="main-container">
+                    <div class="document-card">
+                        <div class="doc-header">
+                            <div class="doc-title">
+                                <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
+                                </svg>
+                                {os.path.basename(source_path)}
+                            </div>
+                            <a href="{download_url}" class="download-btn">Download Raw</a>
+                        </div>
+                        <iframe src="/static/pdfjs/web/viewer.html?file={inline_url}" type="text/html"></iframe>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+             return HTMLResponse(content=html_content)
+
         # Read content
         content = ""
         try:
@@ -365,7 +514,7 @@ async def get_kb_document_view(name: str, file_uuid: str):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Document View - {{os.path.basename(source_path)}}</title>
+            <title>Document View - {os.path.basename(source_path)}</title>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             
@@ -600,32 +749,79 @@ async def get_kb_document_view(name: str, file_uuid: str):
 
             <script>
                 const rawContent = {json_content};
-                // Configure marked options
-                marked.use({{
-                    breaks: true,
-                    gfm: true
-                }});
-                
-                // Simple pre-processor to protect math from marked
-                const originalParse = marked.parse;
-                marked.parse = function(text) {{
-                    // No-op protection: simple replacement might be risky without robust regex.
-                    // For now, let's trust marked + correct delimiters, but if needed we can add protection here.
-                    return originalParse(text);
-                }};
 
-                document.getElementById('content').innerHTML = marked.parse(rawContent);
+                function renderMarkdown(content) {{
+                    // 1. Protect Math: Replace $...$ and $$...$$ with placeholders
+                    // We use a specific placeholder format that marked() won't touch.
+                    const mathBlocks = [];
+                    
+                    // Regex for:
+                    // 1. Display math $$...$$
+                    // 2. Display math \\[...\\] (standard LaTeX)
+                    // 3. Inline math \\(...\\) (standard LaTeX)
+                    // 4. Inline math $...$
+                    // 5. Display math [ ... ] (variant sometimes seen, ensure it contains backslash to avoid false positives with links)
+                    
+                    const regex = /\\$\\$([\\s\\S]*?)\\$\\$|\\\\\\[([\\s\\S]*?)\\\\\\]|\\[(\\s*\\\\[\\s\\S]*?)\\]|\\\\\\(([\\s\\S]*?)\\\\\\)|\\$([^$\\n]*?)\\$/g;
+                    
+                    let protectedContent = content.replace(regex, function(match, m1, m2, m3, m4, m5) {{
+                        const id = `MATH_BLOCK_${{mathBlocks.length}}`;
+                        // Normalize to $$...$$ or $...$ depending on the match type
+                        // m1: $$...$$ content
+                        // m2: \\[...\\] content
+                        // m3: [ ... ] content (our special case)
+                        // m4: \\(...\\) content
+                        // m5: $...$ content
+                        
+                        // We want to store the *normalized* version for restoration
+                        if (m1 !== undefined) mathBlocks.push(`$$${{m1}}$$`); // Already $$
+                        else if (m2 !== undefined) mathBlocks.push(`$$${{m2}}$$`); // Convert \\[ to $$
+                        else if (m3 !== undefined) mathBlocks.push(`$$${{m3}}$$`); // Convert [ ] with backslash to $$
+                        else if (m4 !== undefined) mathBlocks.push(`$${{m4}}$`);  // Convert \\( to $
+                        else if (m5 !== undefined) mathBlocks.push(`$${{m5}}$`);  // Already $
+                        else mathBlocks.push(match); // Fallback
+                        
+                        return id;
+                    }});
 
-                // Render KaTeX
-                renderMathInElement(document.getElementById('content'), {{
-                    delimiters: [
-                        {{left: '$$', right: '$$', display: true}},
-                        {{left: '$', right: '$', display: false}},
-                        {{left: '\\\\(', right: '\\\\)', display: false}},
-                        {{left: '\\\\[', right: '\\\\]', display: true}}
-                    ],
-                    throwOnError: false
-                }});
+                    // 2. Configure marked
+                    const renderer = new marked.Renderer();
+                    const linkRenderer = renderer.link;
+                    renderer.link = (href, title, text) => {{
+                        const html = linkRenderer.call(renderer, href, title, text);
+                        return html.replace(/^<a /, '<a target="_blank" rel="noopener noreferrer" ');
+                    }};
+
+                    // 3. Parse markdown
+                    let html = marked.parse(protectedContent, {{ renderer: renderer }});
+                    
+                    // 4. Restore Math
+                    mathBlocks.forEach((match, index) => {{
+                        const id = `MATH_BLOCK_${{index}}`;
+                        html = html.replace(id, match);
+                    }});
+                    
+                    // 5. Create temp element for math rendering
+                    const temp = document.createElement('div');
+                    temp.innerHTML = html;
+                    
+                    // 6. Render math equations
+                    if (window.renderMathInElement) {{
+                        renderMathInElement(temp, {{
+                            delimiters: [
+                                {{left: '$$', right: '$$', display: true}},
+                                {{left: '$', right: '$', display: false}},
+                                {{left: '\\\\(', right: '\\\\)', display: false}},
+                                {{left: '\\\\[', right: '\\\\]', display: true}}
+                            ],
+                            throwOnError: false
+                        }});
+                    }}
+                    
+                    return temp.innerHTML;
+                }}
+
+                document.getElementById('content').innerHTML = renderMarkdown(rawContent);
             </script>
         </body>
         </html>
@@ -639,20 +835,69 @@ async def get_kb_document_view(name: str, file_uuid: str):
 
 @app.get("/kbs/{name}/docs/{file_uuid}/download")
 async def download_kb_document(name: str, file_uuid: str):
-    """Download a document file."""
+    """Download a document file (Always Attachment)."""
     try:
         db_path = get_kb_path(name)
         manager = VectorDatabaseManager(db_path, collection_name=COLLECTION_NAME_DEFAULT)
         
         source_path = manager.get_file_path_by_uuid(file_uuid)
-        if not source_path or not os.path.exists(source_path):
-            raise HTTPException(status_code=404, detail="Document not found")
+        print(f"DEBUG: Download requested for UUID {file_uuid}")
+        
+        if not source_path:
+             raise HTTPException(status_code=404, detail="Document UUID not found")
+
+        # Fallback logic
+        if not os.path.exists(source_path):
+             kb_dir = os.path.dirname(db_path)
+             potential_path = os.path.join(kb_dir, os.path.basename(source_path))
+             if os.path.exists(potential_path):
+                 source_path = potential_path
+             else:
+                 raise HTTPException(status_code=404, detail="Document not found")
             
-        return FileResponse(source_path, filename=os.path.basename(source_path))
+        return FileResponse(
+            source_path, 
+            filename=os.path.basename(source_path),
+            content_disposition_type="attachment"
+        )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error downloading document: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/kbs/{name}/docs/{file_uuid}/inline")
+async def get_kb_document_inline(name: str, file_uuid: str):
+    """Serve document inline (for iframe viewing)."""
+    try:
+        db_path = get_kb_path(name)
+        manager = VectorDatabaseManager(db_path, collection_name=COLLECTION_NAME_DEFAULT)
+        
+        source_path = manager.get_file_path_by_uuid(file_uuid)
+        
+        if not source_path:
+             raise HTTPException(status_code=404, detail="Document UUID not found")
+
+        # Fallback logic
+        if not os.path.exists(source_path):
+             kb_dir = os.path.dirname(db_path)
+             potential_path = os.path.join(kb_dir, os.path.basename(source_path))
+             if os.path.exists(potential_path):
+                 source_path = potential_path
+             else:
+                 raise HTTPException(status_code=404, detail="Document not found")
+
+        # Force inline display
+        return FileResponse(
+            source_path, 
+            media_type='application/pdf',
+            filename=os.path.basename(source_path),
+            content_disposition_type="inline"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error serving inline document: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
