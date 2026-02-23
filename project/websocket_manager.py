@@ -60,7 +60,7 @@ class ConnectionManager:
         
         # Get all instructor user IDs
         result = await db.execute(
-            select(User.id).where(User.role == "instructor")
+            select(User.id).where(User.global_role == "instructor")
         )
         instructor_ids = [row[0] for row in result.all()]
         
@@ -81,7 +81,7 @@ class ConnectionManager:
         
         # Get all instructor user IDs
         result = await db.execute(
-            select(User.id).where(User.role == "instructor")
+            select(User.id).where(User.global_role == "instructor")
         )
         instructor_ids = [row[0] for row in result.all()]
         

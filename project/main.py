@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.orm import selectinload
 from contextlib import asynccontextmanager
 from typing import List, Optional
@@ -34,7 +34,8 @@ from schemas import (
     SuggestAnswerResponse, MessageCreate, MessageCreateResponse,
     KBCreateRequest, KBFileDeleteRequest, VerifyEmailRequest,
     ClassCreateRequest, ClassResponse, RotateCodeResponse, JoinClassRequest,
-    RosterResponse, RosterUserResponse, SetRoleRequest, UpdateEmailRequest
+    RosterResponse, RosterUserResponse, SetRoleRequest, UpdateEmailRequest,
+    EnrolledClassResponse, TAsListResponse, TACreateRequest, TAResponse
 )
 from email_utils import generate_verification_token, send_verification_email
 import secrets
@@ -73,7 +74,14 @@ templates = Jinja2Templates(directory="templates")
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
     """Serve the main page."""
-    return templates.TemplateResponse("index.html", {"request": request})
+    response = templates.TemplateResponse(
+        "index.html", 
+        {"request": request, "cache_buster": int(datetime.utcnow().timestamp())}
+    )
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.websocket("/ws")
@@ -135,22 +143,29 @@ async def register(
     
     token = generate_verification_token()
     
+    from auth import REQUIRE_EMAIL_VERIFICATION
+    
     new_user = User(
         email=normalized_email,
         password_hash=hash_password(request.password),
         global_role="student",
-        verify_token_hash=hash_password(token),  # Re-use our password hasher for the token!
-        verify_expires_at=datetime.utcnow() + timedelta(minutes=15),
-        is_instructor_pending=(request.intent == "instructor")
+        verify_token_hash=hash_password(token) if REQUIRE_EMAIL_VERIFICATION else None,
+        verify_expires_at=(datetime.utcnow() + timedelta(minutes=15)) if REQUIRE_EMAIL_VERIFICATION else None,
+        is_instructor_pending=(request.intent == "instructor"),
+        email_verified=not REQUIRE_EMAIL_VERIFICATION
     )
     
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
     
-    await send_verification_email(new_user.email, token)
+    if REQUIRE_EMAIL_VERIFICATION:
+        await send_verification_email(new_user.email, token)
     
-    return RegisterResponse(user_id=new_user.id)
+    return RegisterResponse(
+        user_id=new_user.id, 
+        requires_verification=REQUIRE_EMAIL_VERIFICATION
+    )
 
 
 @app.post("/api/verify-email")
@@ -216,7 +231,8 @@ async def login(
             detail="Invalid email or password"
         )
         
-    if not user.email_verified:
+    from auth import REQUIRE_EMAIL_VERIFICATION
+    if REQUIRE_EMAIL_VERIFICATION and not user.email_verified:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email verification required. Please check your email inbox."
@@ -237,6 +253,33 @@ def generate_join_code(length: int = 8) -> str:
     alphabet = string.ascii_uppercase + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
+@app.get("/api/classes", response_model=List[EnrolledClassResponse])
+async def get_my_classes(
+    current_user: User = Depends(require_verified_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get all classes the current user is enrolled in."""
+    # We join Enrollment and Class where user_id matches
+    result = await db.execute(
+        select(Class, Enrollment)
+        .join(Enrollment, Class.id == Enrollment.class_id)
+        .where(Enrollment.user_id == current_user.id)
+    )
+    
+    classes_list = []
+    for c, e in result.all():
+        classes_list.append(
+            EnrolledClassResponse(
+                id=c.id,
+                name=c.name,
+                code=c.code,
+                role=e.class_role if isinstance(e.class_role, str) else e.class_role.value,
+                created_at=c.created_at
+            )
+        )
+        
+    return classes_list
+
 @app.post("/api/classes", response_model=ClassResponse, status_code=status.HTTP_201_CREATED)
 async def create_class(
     request: ClassCreateRequest,
@@ -249,18 +292,25 @@ async def create_class(
     
     new_class = Class(
         name=request.name,
-        code=request.name[:50], # Optional custom code vs name mapping if needed
+        code=join_code,
         join_code_hash=hash_password(join_code),
         created_by_user_id=current_user.id
     )
     db.add(new_class)
     await db.flush() # flush to get the new_class.id
     
+    # Auto-generate a kb_name
+    kb_name = f"class_kb_{new_class.id}"
+    new_class.kb_name = kb_name
+    
+    from services import create_knowledge_base
+    await create_knowledge_base(kb_name)
+    
     # 2. Auto-enroll creator as instructor
     enrollment = Enrollment(
         class_id=new_class.id,
         user_id=current_user.id,
-        class_role=ClassRole.instructor
+        class_role=ClassRole.owner
     )
     db.add(enrollment)
     
@@ -283,6 +333,53 @@ async def create_class(
         created_at=new_class.created_at
     )
 
+@app.delete("/api/classes/{class_id}")
+async def delete_class(
+    class_id: int,
+    current_user: User = Depends(require_instructor),
+    db: AsyncSession = Depends(get_db)
+):
+    """Delete a class. Only the creator or a global admin can delete it."""
+    result = await db.execute(select(Class).where(Class.id == class_id))
+    class_obj = result.scalar_one_or_none()
+    
+    if not class_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
+        
+    user_g_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
+    
+    enroll_res = await db.execute(
+        select(Enrollment).where(
+            Enrollment.class_id == class_id, Enrollment.user_id == current_user.id
+        )
+    )
+    enroll = enroll_res.scalar_one_or_none()
+    c_role = enroll.class_role if enroll and isinstance(enroll.class_role, str) else (enroll.class_role.value if enroll else None)
+    
+    # Must be owner OR admin
+    if c_role != "owner" and user_g_role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the class owner or an admin can delete this class")
+        
+    # Delete related records
+    await db.execute(delete(Enrollment).where(Enrollment.class_id == class_id))
+    await db.execute(delete(TAAllowlist).where(TAAllowlist.class_id == class_id))
+    await db.execute(delete(AuditLog).where(AuditLog.class_id == class_id))
+    
+    # Check if there are messages/questions tied to class. 
+    # Current schema: Questions are tied to User, NOT Class. So we don't need to delete Questions here.
+    
+    await db.execute(delete(Class).where(Class.id == class_id))
+    
+    audit = AuditLog(
+        actor_user_id=current_user.id,
+        action="deleted_class",
+        old_value=class_obj.name
+    )
+    db.add(audit)
+    
+    await db.commit()
+    return {"message": "Class deleted successfully"}
+
 @app.post("/api/classes/{class_id}/rotate-code", response_model=RotateCodeResponse)
 async def rotate_class_code(
     class_id: int,
@@ -304,11 +401,12 @@ async def rotate_class_code(
             )
         )
         enroll = enroll_res.scalar_one_or_none()
-        if not enroll or enroll.class_role != ClassRole.instructor:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not an instructor for this class")
+        if not enroll or (isinstance(enroll.class_role, str) and enroll.class_role not in ["instructor", "owner"]) and (not isinstance(enroll.class_role, str) and enroll.class_role.value not in ["instructor", "owner"]):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not an instructor or owner for this class")
 
     new_code = generate_join_code()
     class_obj.join_code_hash = hash_password(new_code)
+    class_obj.code = new_code
     class_obj.join_code_rotated_at = datetime.utcnow()
     
     audit = AuditLog(
@@ -403,8 +501,8 @@ async def get_class_roster(
     enroll = enroll_res.scalar_one_or_none()
     user_g_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
     
-    if user_g_role != "admin" and (not enroll or (isinstance(enroll.class_role, str) and enroll.class_role != "instructor") and (not isinstance(enroll.class_role, str) and enroll.class_role.value != "instructor")):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Must be an instructor of this class.")
+    if user_g_role != "admin" and (not enroll or (isinstance(enroll.class_role, str) and enroll.class_role not in ["instructor", "owner"]) and (not isinstance(enroll.class_role, str) and enroll.class_role.value not in ["instructor", "owner"])):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Must be an instructor or owner of this class.")
 
     # Fetch users in the class
     result = await db.execute(
@@ -421,11 +519,127 @@ async def get_class_roster(
                 email=user.email,
                 full_name=user.full_name,
                 class_role=enrollment.class_role if isinstance(enrollment.class_role, str) else enrollment.class_role.value,
+                global_role=user.global_role if isinstance(user.global_role, str) else user.global_role.value,
                 joined_at=enrollment.joined_at
             )
         )
         
     return RosterResponse(class_id=class_id, roster=roster_list)
+
+@app.get("/api/classes/{class_id}/tas", response_model=TAsListResponse)
+async def get_class_tas(
+    class_id: int,
+    current_user: User = Depends(require_verified_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get the pre-approved TA allowlist for a class (instructors only)."""
+    # Verify instructor access
+    enroll_res = await db.execute(
+        select(Enrollment).where(
+            Enrollment.class_id == class_id, Enrollment.user_id == current_user.id
+        )
+    )
+    enroll = enroll_res.scalar_one_or_none()
+    user_g_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
+    
+    if user_g_role != "admin" and (not enroll or (isinstance(enroll.class_role, str) and enroll.class_role != "instructor") and (not isinstance(enroll.class_role, str) and enroll.class_role.value != "instructor")):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Must be an instructor of this class.")
+        
+    result = await db.execute(select(TAAllowlist).where(TAAllowlist.class_id == class_id))
+    tas = result.scalars().all()
+    
+    return TAsListResponse(tas=[TAResponse(email=ta.email) for ta in tas])
+
+@app.post("/api/classes/{class_id}/tas")
+async def add_class_ta(
+    class_id: int,
+    request: TACreateRequest,
+    current_user: User = Depends(require_verified_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Add an email to the TA allowlist."""
+    # Verify instructor access
+    enroll_res = await db.execute(
+        select(Enrollment).where(
+            Enrollment.class_id == class_id, Enrollment.user_id == current_user.id
+        )
+    )
+    enroll = enroll_res.scalar_one_or_none()
+    user_g_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
+    
+    if user_g_role != "admin" and (not enroll or (isinstance(enroll.class_role, str) and enroll.class_role != "instructor") and (not isinstance(enroll.class_role, str) and enroll.class_role.value != "instructor")):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Must be an instructor of this class.")
+        
+    normalized_email = normalize_email(request.email)
+    
+    # Check if already in allowlist
+    existing = await db.execute(select(TAAllowlist).where(TAAllowlist.class_id == class_id, TAAllowlist.email == normalized_email))
+    if existing.scalar_one_or_none():
+         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email is already in the TA allowlist for this class.")
+    
+    # Add to allowlist
+    new_ta = TAAllowlist(class_id=class_id, email=normalized_email)
+    db.add(new_ta)
+    
+    # If the user is already enrolled, upgrade their role
+    target_user = await db.execute(select(User).where(User.email == normalized_email))
+    user_obj = target_user.scalar_one_or_none()
+    if user_obj:
+        target_enrollment = await db.execute(select(Enrollment).where(Enrollment.class_id == class_id, Enrollment.user_id == user_obj.id))
+        target_enroll = target_enrollment.scalar_one_or_none()
+        if target_enroll:
+            target_enroll.class_role = ClassRole.ta
+            
+    audit = AuditLog(actor_user_id=current_user.id, target_user_id=user_obj.id if user_obj else None, class_id=class_id, action="added_ta_allowlist", new_value=normalized_email)
+    db.add(audit)
+    
+    await db.commit()
+    return {"message": "TA added to allowlist successfully"}
+
+@app.delete("/api/classes/{class_id}/tas/{email}")
+async def remove_class_ta(
+    class_id: int,
+    email: str,
+    current_user: User = Depends(require_verified_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Remove an email from the TA allowlist."""
+    # Verify instructor access
+    enroll_res = await db.execute(
+        select(Enrollment).where(
+            Enrollment.class_id == class_id, Enrollment.user_id == current_user.id
+        )
+    )
+    enroll = enroll_res.scalar_one_or_none()
+    user_g_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
+    
+    if user_g_role != "admin" and (not enroll or (isinstance(enroll.class_role, str) and enroll.class_role != "instructor") and (not isinstance(enroll.class_role, str) and enroll.class_role.value != "instructor")):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Must be an instructor of this class.")
+        
+    normalized_email = normalize_email(email)
+    
+    db_res = await db.execute(select(TAAllowlist).where(TAAllowlist.class_id == class_id, TAAllowlist.email == normalized_email))
+    ta_entry = db_res.scalar_one_or_none()
+    
+    if not ta_entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Email not found in TA allowlist.")
+        
+    await db.delete(ta_entry)
+    
+    # If the user is enrolled, downgrade their role back to student
+    target_user = await db.execute(select(User).where(User.email == normalized_email))
+    user_obj = target_user.scalar_one_or_none()
+    if user_obj:
+        target_enrollment = await db.execute(select(Enrollment).where(Enrollment.class_id == class_id, Enrollment.user_id == user_obj.id))
+        target_enroll = target_enrollment.scalar_one_or_none()
+        if target_enroll and (isinstance(target_enroll.class_role, str) and target_enroll.class_role == "ta" or target_enroll.class_role.value == "ta"):
+            target_enroll.class_role = ClassRole.student
+            
+    audit = AuditLog(actor_user_id=current_user.id, target_user_id=user_obj.id if user_obj else None, class_id=class_id, action="removed_ta_allowlist", old_value=normalized_email)
+    db.add(audit)
+    
+    await db.commit()
+    return {"message": "TA removed from allowlist successfully"}
 
 @app.post("/api/classes/{class_id}/set-role")
 async def set_class_role(
@@ -459,6 +673,17 @@ async def set_class_role(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User is not enrolled in this class.")
         
     old_role = target_enrollment.class_role if isinstance(target_enrollment.class_role, str) else target_enrollment.class_role.value
+    c_role = enroll.class_role if enroll and isinstance(enroll.class_role, str) else (enroll.class_role.value if enroll else None)
+    
+    if old_role == "owner":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot change the role of the class owner.")
+        
+    if request.class_role == "instructor" and c_role != "owner" and user_g_role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only class owners can promote users to instructor.")
+        
+    if old_role == "instructor" and c_role != "owner" and user_g_role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only class owners can demote an instructor.")
+        
     target_enrollment.class_role = request.class_role
     
     audit = AuditLog(
@@ -540,7 +765,8 @@ async def get_me(current_user: User = Depends(get_current_user)):
     return UserResponse(
         id=current_user.id,
         email=current_user.email,
-        role=role_str
+        role=role_str,
+        is_instructor_pending=current_user.is_instructor_pending
     )
 
 
@@ -558,8 +784,22 @@ async def create_question(
             detail="Only students can ask questions"
         )
     
+    # Verify the user is enrolled in the given class
+    enrollment = await db.execute(
+        select(Enrollment).where(
+            Enrollment.user_id == current_user.id,
+            Enrollment.class_id == request.class_id
+        )
+    )
+    if not enrollment.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not enrolled in this class"
+        )
+        
     new_question = Question(
         user_id=current_user.id,
+        class_id=request.class_id,
         content=request.content,
         status="pending"
     )
@@ -571,6 +811,7 @@ async def create_question(
     # Prepare question data for broadcast
     question_data = {
         "id": new_question.id,
+        "class_id": new_question.class_id,
         "user_email": current_user.email,
         "content": new_question.content,
         "status": "pending",
@@ -597,16 +838,26 @@ async def create_question(
 
 @app.get("/api/questions", response_model=List[QuestionResponse])
 async def get_my_questions(
+    class_id: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get all questions for the current user."""
-    result = await db.execute(
-        select(Question)
-        .options(selectinload(Question.messages))
-        .where(Question.user_id == current_user.id)
-        .order_by(Question.created_at.desc())
-    )
+    """Get all questions for the class."""
+    if class_id is None:
+        query = select(Question).options(selectinload(Question.messages)).where(Question.user_id == current_user.id)
+    else:
+        # Verify enrollment
+        enroll_res = await db.execute(
+            select(Enrollment).where(
+                Enrollment.class_id == class_id, Enrollment.user_id == current_user.id
+            )
+        )
+        if not enroll_res.scalar_one_or_none():
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not enrolled in this class")
+            
+        query = select(Question).options(selectinload(Question.messages)).where(Question.class_id == class_id)
+        
+    result = await db.execute(query.order_by(Question.created_at.desc()))
     questions = result.scalars().all()
     
     response = []
@@ -625,6 +876,7 @@ async def get_my_questions(
         question_status = question.status if isinstance(question.status, str) else question.status.value
         response.append(QuestionResponse(
             id=question.id,
+            class_id=question.class_id,
             content=question.content,
             status=question_status,
             created_at=question.created_at,
@@ -636,15 +888,32 @@ async def get_my_questions(
 
 @app.get("/api/instructor/questions", response_model=List[InstructorQuestionResponse])
 async def get_all_questions(
-    current_user: User = Depends(require_instructor),
+    class_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get all questions (instructors only)."""
-    result = await db.execute(
-        select(Question)
-        .options(selectinload(Question.messages), selectinload(Question.user))
-        .order_by(Question.created_at.desc())
-    )
+    """Get all questions (instructors and TAs only)."""
+    user_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
+    
+    if user_role == "student":
+        if not class_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Students cannot view all questions without a specific class_id.")
+        
+        enroll_res = await db.execute(
+            select(Enrollment).where(
+                Enrollment.class_id == class_id, Enrollment.user_id == current_user.id
+            )
+        )
+        enroll = enroll_res.scalar_one_or_none()
+        c_role = enroll.class_role if enroll and isinstance(enroll.class_role, str) else (enroll.class_role.value if enroll else None)
+        if c_role not in ["instructor", "ta", "owner"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You must be an instructor, TA, or owner to view all questions.")
+    # Instructors should only see questions from classes they are instructors for if class_id is given.
+    query = select(Question).options(selectinload(Question.messages), selectinload(Question.user))
+    if class_id is not None:
+        query = query.where(Question.class_id == class_id)
+        
+    result = await db.execute(query.order_by(Question.created_at.desc()))
     questions = result.scalars().all()
     
     response = []
@@ -663,6 +932,7 @@ async def get_all_questions(
         question_status = question.status if isinstance(question.status, str) else question.status.value
         response.append(InstructorQuestionResponse(
             id=question.id,
+            class_id=question.class_id,
             user_email=question.user.email,
             content=question.content,
             status=question_status,
@@ -676,13 +946,13 @@ async def get_all_questions(
 @app.get("/api/instructor/suggest/{question_id}", response_model=SuggestAnswerResponse)
 async def suggest_answer(
     question_id: int,
-    kb_name: str = None,
-    current_user: User = Depends(require_instructor),
+    kb_name: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get suggested answer for a question (instructors only)."""
+    """Get suggested answer for a question (instructors and TAs only)."""
     result = await db.execute(
-        select(Question).where(Question.id == question_id)
+        select(Question).options(selectinload(Question.class_)).where(Question.id == question_id)
     )
     question = result.scalar_one_or_none()
     
@@ -692,8 +962,21 @@ async def suggest_answer(
             detail="Question not found"
         )
     
+    user_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
+    if user_role == "student":
+        enroll_res = await db.execute(
+            select(Enrollment).where(
+                Enrollment.class_id == question.class_id, Enrollment.user_id == current_user.id
+            )
+        )
+        enroll = enroll_res.scalar_one_or_none()
+        c_role = enroll.class_role if enroll and isinstance(enroll.class_role, str) else (enroll.class_role.value if enroll else None)
+        if c_role not in ["instructor", "ta", "owner"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You must be an instructor, TA, or owner to generate suggestions.")
+    
     try:
-        suggestion = await get_suggested_answer(db, question_id, kb_name=kb_name)
+        final_kb_name = kb_name or (question.class_.kb_name if question.class_ else None)
+        suggestion = await get_suggested_answer(db, question_id, kb_name=final_kb_name)
         return SuggestAnswerResponse(
             suggested_answer=suggestion["suggested_answer"],
             source=suggestion["source"]
@@ -734,7 +1017,13 @@ async def create_message(
     
     user_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
     
-    if user_role == "student" and question.user_id != current_user.id:
+    enroll_res = await db.execute(select(Enrollment).where(Enrollment.class_id == question.class_id, Enrollment.user_id == current_user.id))
+    enroll = enroll_res.scalar_one_or_none()
+    c_role = enroll.class_role if enroll and isinstance(enroll.class_role, str) else (enroll.class_role.value if enroll else "student")
+    
+    is_staff = user_role in ["admin", "instructor"] or c_role in ["ta", "instructor", "owner"]
+    
+    if not is_staff and question.user_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only reply to your own questions"
@@ -743,11 +1032,11 @@ async def create_message(
     new_message = Message(
         question_id=question_id,
         content=request.content,
-        role=MessageRole.instructor if user_role == "instructor" else MessageRole.student,
+        role=MessageRole.instructor if is_staff else MessageRole.student,
         source=request.source
     )
     
-    if user_role == "instructor":
+    if is_staff:
         question.status = "answered"
     
     db.add(new_message)

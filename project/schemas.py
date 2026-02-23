@@ -12,6 +12,7 @@ class RegisterRequest(BaseModel):
 
 class RegisterResponse(BaseModel):
     user_id: int
+    requires_verification: bool = True
 
 
 class LoginRequest(BaseModel):
@@ -28,6 +29,7 @@ class UserResponse(BaseModel):
     id: int
     email: str
     role: str
+    is_instructor_pending: bool = False
 
 class VerifyEmailRequest(BaseModel):
     email: EmailStr
@@ -47,6 +49,14 @@ class ClassResponse(BaseModel):
     code: Optional[str] = None
     created_at: datetime
     
+class EnrolledClassResponse(BaseModel):
+    id: int
+    name: str
+    code: Optional[str] = None
+    kb_name: Optional[str] = None
+    role: str
+    created_at: datetime
+    
 class RotateCodeResponse(BaseModel):
     join_code: str
 
@@ -58,6 +68,7 @@ class RosterUserResponse(BaseModel):
     email: str
     full_name: Optional[str] = None
     class_role: str
+    global_role: str
     joined_at: datetime
 
 class RosterResponse(BaseModel):
@@ -71,6 +82,7 @@ class SetRoleRequest(BaseModel):
 
 # Question Schemas
 class QuestionCreate(BaseModel):
+    class_id: int
     content: str
 
 
@@ -105,6 +117,7 @@ class KBFileDeleteRequest(BaseModel):
 # Question with Messages
 class QuestionResponse(BaseModel):
     id: int
+    class_id: Optional[int] = None
     content: str
     status: str
     created_at: datetime
@@ -113,6 +126,7 @@ class QuestionResponse(BaseModel):
 
 class InstructorQuestionResponse(BaseModel):
     id: int
+    class_id: Optional[int] = None
     user_email: str
     content: str
     status: str
@@ -129,6 +143,17 @@ class SuggestAnswerResponse(BaseModel):
 # Legacy schemas for backward compatibility
 class AnswerResponse(MessageResponse):
     pass
+
+
+# TA Management
+class TACreateRequest(BaseModel):
+    email: EmailStr
+
+class TAResponse(BaseModel):
+    email: str
+
+class TAsListResponse(BaseModel):
+    tas: List[TAResponse]
 
 
 class AnswerCreate(MessageCreate):

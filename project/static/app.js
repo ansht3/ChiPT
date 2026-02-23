@@ -1,4 +1,6 @@
 let currentUser = null;
+let currentClassId = null;
+let enrolledClasses = [];
 let selectedQuestionId = null;
 let allQuestions = [];
 let websocket = null;
@@ -364,7 +366,7 @@ async function apiCall(endpoint, options = {}) {
             clearToken();
             disconnectWebSocket();
             showAuthView();
-            throw new Error('Session expired. Please login again.');
+            // Let it fall through to extract error details
         }
         
         if (!response.ok) {
@@ -382,32 +384,82 @@ async function apiCall(endpoint, options = {}) {
 }
 
 // ============================================================================
-// View Management
-// ============================================================================
+function setActiveNavBtn(btnId) {
+    document.querySelectorAll('.nav-btn').forEach(btn => {
+        btn.classList.remove('bg-blue-50', 'text-primary-dark');
+        btn.classList.add('text-secondary');
+        btn.classList.remove('text-primary');
+    });
+    const activeBtn = document.getElementById(btnId);
+    if (activeBtn) {
+        activeBtn.classList.remove('text-secondary');
+        activeBtn.classList.add('bg-blue-50', 'text-primary-dark');
+    }
+}
 
 function showAuthView() {
+    // ...
+    // hide all views
     document.getElementById('auth-view').classList.remove('hidden');
     document.getElementById('dashboard-view').classList.add('hidden');
+    document.getElementById('kb-view')?.classList.add('hidden');
+    document.getElementById('verify-view')?.classList.add('hidden');
     document.getElementById('nav-actions').classList.add('hidden');
     disconnectWebSocket();
+    
+    document.getElementById('register-success-view')?.classList.add('hidden');
+    document.getElementById('login-form')?.classList.remove('hidden');
+    document.getElementById('register-form')?.classList.add('hidden');
+    document.getElementById('show-login')?.classList.add('bg-white', 'text-primary', 'shadow-sm');
+    document.getElementById('show-login')?.classList.remove('text-gray-600');
+    document.getElementById('show-register')?.classList.remove('bg-white', 'text-primary', 'shadow-sm');
+    document.getElementById('show-register')?.classList.add('text-gray-600');
 }
 
 function showDashboardView() {
     document.getElementById('auth-view').classList.add('hidden');
     document.getElementById('dashboard-view').classList.remove('hidden');
-    document.getElementById('kb-view').classList.add('hidden');
+    document.getElementById('kb-view')?.classList.add('hidden');
+    document.getElementById('classes-view')?.classList.add('hidden');
+    document.getElementById('account-settings-view')?.classList.add('hidden');
     document.getElementById('nav-actions').classList.remove('hidden');
     document.getElementById('nav-actions').classList.add('flex');
+    setActiveNavBtn('nav-questions-btn');
 }
 
 function showKbView() {
     document.getElementById('auth-view').classList.add('hidden');
     document.getElementById('dashboard-view').classList.add('hidden');
+    document.getElementById('classes-view')?.classList.add('hidden');
+    document.getElementById('account-settings-view')?.classList.add('hidden');
     document.getElementById('kb-view').classList.remove('hidden');
     document.getElementById('nav-actions').classList.remove('hidden');
     document.getElementById('nav-actions').classList.add('flex');
+    setActiveNavBtn('kb-btn');
     loadKnowledgeBases();
     fetchActiveKb();
+}
+
+function showClassesView() {
+    document.getElementById('auth-view').classList.add('hidden');
+    document.getElementById('dashboard-view').classList.add('hidden');
+    document.getElementById('kb-view')?.classList.add('hidden');
+    document.getElementById('account-settings-view')?.classList.add('hidden');
+    document.getElementById('classes-view').classList.remove('hidden');
+    document.getElementById('nav-actions').classList.remove('hidden');
+    document.getElementById('nav-actions').classList.add('flex');
+    loadClasses();
+}
+
+function showAccountSettingsView() {
+    document.getElementById('auth-view').classList.add('hidden');
+    document.getElementById('dashboard-view').classList.add('hidden');
+    document.getElementById('kb-view')?.classList.add('hidden');
+    document.getElementById('classes-view')?.classList.add('hidden');
+    document.getElementById('account-settings-view').classList.remove('hidden');
+    document.getElementById('nav-actions').classList.remove('hidden');
+    document.getElementById('nav-actions').classList.add('flex');
+    setActiveNavBtn('account-settings-btn');
 }
 
 // ============================================================================
@@ -471,7 +523,7 @@ function renderQuestionsSidebar(questions) {
                 </span>
                 <span class="text-xs text-gray-500 mono">${formatDate(q.created_at)}</span>
             </div>
-            ${currentUser.role === 'instructor' ? `
+            ${(enrolledClasses.find(c => c.id == currentClassId)?.role === 'instructor' || enrolledClasses.find(c => c.id == currentClassId)?.role === 'ta' || enrolledClasses.find(c => c.id == currentClassId)?.role === 'owner') ? `
                 <div class="text-xs text-gray-500 mb-1 font-medium">${escapeHtml(q.user_email)}</div>
             ` : ''}
             <p class="text-sm text-gray-800 line-clamp-2 mb-1">${escapeHtml(q.content)}</p>
@@ -506,7 +558,8 @@ function renderQuestionDetail(question) {
     
     selectedQuestionId = question.id;
     
-    const isInstructor = currentUser.role === 'instructor';
+    const activeClass = enrolledClasses.find(c => c.id == currentClassId);
+    const isStaff = activeClass && (activeClass.role === 'owner' || activeClass.role === 'instructor' || activeClass.role === 'ta');
     const messages = question.messages || [];
     
     container.innerHTML = `
@@ -515,7 +568,7 @@ function renderQuestionDetail(question) {
             <div class="bg-white rounded-2xl shadow-lg p-6 mb-6">
                 <div class="flex items-start justify-between gap-4 mb-4">
                     <div class="flex-1">
-                        ${isInstructor ? `
+                        ${isStaff ? `
                             <div class="flex items-center gap-2 text-sm text-gray-600 mb-2">
                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
@@ -547,7 +600,7 @@ function renderQuestionDetail(question) {
                 <div class="chat-thread mb-6">
                     ${messages.length === 0 ? `
                         <div class="text-center py-8 text-gray-400">
-                            <p class="text-sm">No messages yet. ${isInstructor ? 'Be the first to respond!' : 'Waiting for instructor response...'}</p>
+                            <p class="text-sm">No messages yet. ${isStaff ? 'Be the first to respond!' : 'Waiting for instructor response...'}</p>
                         </div>
                     ` : messages.map(msg => `
                         <div class="message-bubble ${msg.role}" data-message-id="${msg.id}">
@@ -568,7 +621,7 @@ function renderQuestionDetail(question) {
                     `).join('')}
                 </div>
                 
-                ${isInstructor ? `
+                ${isStaff ? `
                     <!-- Instructor Reply Box -->
                     <div class="reply-box">
                         <div id="suggestion-${question.id}" class="hidden suggestion-box mb-4">
@@ -596,7 +649,7 @@ function renderQuestionDetail(question) {
                             Get AI Suggestion
                         </button>
 
-                        <div id="kb-selection-${question.id}" class="mb-4 ${currentUser.role === 'instructor' ? '' : 'hidden'}">
+                        <div id="kb-selection-${question.id}" class="mb-4 ${isStaff ? '' : 'hidden'}">
                              <label class="block text-xs font-semibold text-gray-700 mb-1">Select Knowledge Base</label>
                              <select id="kb-select-${question.id}" class="input-field text-sm py-1">
                                  <!-- Options populated by JS -->
@@ -647,7 +700,7 @@ function renderQuestionDetail(question) {
     }, 100);
 
     // Populate KB select
-    if (isInstructor) {
+    if (isStaff) {
         populateKbSelect(question.id);
     }
 }
@@ -775,11 +828,14 @@ window.sendMessage = async function(questionId) {
             (document.getElementById(`source-${questionId}`).textContent === 'cached' ? 'cached' : 'ai') : 
             'manual';
         
+        const activeClass = enrolledClasses.find(c => c.id == currentClassId);
+        const isStaff = activeClass && (activeClass.role === 'owner' || activeClass.role === 'instructor' || activeClass.role === 'ta');
+        
         await apiCall(`/questions/${questionId}/messages`, {
             method: 'POST',
             body: JSON.stringify({
                 content: content,
-                source: currentUser.role === 'instructor' ? source : null
+                source: isStaff ? source : null
             })
         });
         
@@ -802,13 +858,21 @@ window.sendMessage = async function(questionId) {
 
 async function loadQuestions() {
     try {
+        if (!currentClassId) {
+            allQuestions = [];
+            updateStats();
+            renderQuestionsSidebar(allQuestions);
+            renderQuestionDetail(null);
+            return;
+        }
+
         showLoading();
         
-        if (currentUser.role === 'student') {
-            allQuestions = await apiCall('/questions');
-        } else {
-            allQuestions = await apiCall('/instructor/questions');
-        }
+        const activeClass = enrolledClasses.find(c => c.id == currentClassId);
+        const isStaff = activeClass && (activeClass.role === 'owner' || activeClass.role === 'instructor' || activeClass.role === 'ta');
+        
+        let endpoint = isStaff ? '/instructor/questions' : '/questions';
+        allQuestions = await apiCall(`${endpoint}?class_id=${currentClassId}`);
         
         updateStats();
         renderQuestionsSidebar(allQuestions);
@@ -837,6 +901,12 @@ async function loadCurrentUser() {
         console.log("Current user role:", currentUser.role);
         document.getElementById('user-email').textContent = currentUser.email;
         
+        if (currentUser.is_instructor_pending) {
+            document.getElementById('instructor-pending-banner')?.classList.remove('hidden');
+        } else {
+            document.getElementById('instructor-pending-banner')?.classList.add('hidden');
+        }
+        
         if (currentUser.role === 'instructor') {
             document.getElementById('kb-btn').classList.remove('hidden');
             document.getElementById('kb-btn').classList.add('flex');
@@ -847,6 +917,11 @@ async function loadCurrentUser() {
         }
 
         showDashboardView();
+
+        // Load classes first to set currentClassId
+        await loadClasses();
+        
+        // Load questions for the selected class
         await loadQuestions();
         
         connectWebSocket();
@@ -902,6 +977,12 @@ function showNewQuestionModal() {
         
         errorEl.classList.add('hidden');
         
+        if (!currentClassId) {
+            errorEl.textContent = 'You must select a class first';
+            errorEl.classList.remove('hidden');
+            return;
+        }
+        
         if (!content) {
             errorEl.textContent = 'Question cannot be empty';
             errorEl.classList.remove('hidden');
@@ -910,9 +991,12 @@ function showNewQuestionModal() {
         
         try {
             showLoading();
-            await apiCall('/questions', {
+            const res = await apiCall('/questions', {
                 method: 'POST',
-                body: JSON.stringify({ content })
+                body: JSON.stringify({ 
+                    content,
+                    class_id: currentClassId 
+                })
             });
             
             modal.remove();
@@ -1165,11 +1249,33 @@ async function setActiveKb() {
 async function loadKnowledgeBases() {
     try {
         showLoading();
-        const data = await apiCall('/instructor/kbs');
-        allKbs = data.kbs || [];
+        
+        const currentClass = enrolledClasses.find(c => parseInt(c.id) === currentClassId);
+        
+        if (!currentClass || !currentClass.kb_name) {
+            allKbs = [];
+            renderKbList([]);
+            document.getElementById('kb-details-content').classList.add('hidden');
+            document.getElementById('kb-details-content').classList.remove('flex');
+            document.getElementById('kb-details-empty').classList.remove('hidden');
+            document.getElementById('kb-details-empty').innerHTML = `
+                <div class="text-center">
+                    <svg class="w-16 h-16 text-gray-300 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
+                    </svg>
+                    <h3 class="text-xl font-bold text-gray-700 mb-2">No Knowledge Base Available</h3>
+                    <p class="text-gray-500">This class does not have an active Knowledge Base.</p>
+                </div>
+            `;
+            return;
+        }
+
+        allKbs = [currentClass.kb_name];
         renderKbList(allKbs);
+        await selectKb(currentClass.kb_name);
+        
     } catch (error) {
-        showNotification('Failed to load KBs: ' + error.message, 'error');
+        showNotification('Failed to load KB: ' + error.message, 'error');
     } finally {
         hideLoading();
     }
@@ -1409,6 +1515,534 @@ function setupDragAndDrop(kbName) {
 
 
 // ============================================================================
+// Class Management & Account Settings
+// ============================================================================
+
+let currentRosterClassId = null;
+
+async function loadClasses() {
+    try {
+        const container = document.getElementById('classes-list');
+        const selector = document.getElementById('active-class-selector');
+        
+        container.innerHTML = '';
+        selector.innerHTML = '';
+        
+        enrolledClasses = await apiCall('/classes');
+        
+        if (enrolledClasses.length === 0) {
+            selector.classList.add('hidden');
+            container.innerHTML = `
+                <div class="col-span-full text-center py-12 text-gray-500 bg-gray-50 rounded-xl border-2 border-dashed border-gray-200">
+                    <h3 class="text-xl text-gray-800 font-bold mb-2">Welcome to ChiPT!</h3>
+                    <p>You haven't joined any classes yet. Create or Join a class above to get started.</p>
+                </div>
+            `;
+            currentClassId = null;
+            
+            // Redirect straight to settings if they have no classes
+            showAccountSettingsView();
+            
+        } else {
+            selector.classList.remove('hidden');
+            let foundCurrent = false;
+
+            // Hide empty state if classes exist
+            const emptyState = document.getElementById('dashboard-empty-state');
+            const contentLayer = document.getElementById('dashboard-content-layer');
+            if (emptyState) emptyState.classList.add('hidden');
+            if (contentLayer) contentLayer.classList.remove('hidden');
+            
+            // Default to the first class if none selected
+            if (!currentClassId && enrolledClasses.length > 0) {
+                currentClassId = enrolledClasses[0].id;
+            }
+            
+            enrolledClasses.forEach(c => {
+                // Dropdown setup
+                const option = document.createElement('option');
+                option.value = c.id;
+                option.textContent = c.name;
+                selector.appendChild(option);
+                
+                if (c.id == currentClassId) foundCurrent = true;
+
+                // Card setup
+                const card = document.createElement('div');
+                card.className = "bg-white border rounded-xl p-5 hover:shadow-md transition-shadow cursor-pointer flex flex-col h-full";
+                const isInstructor = c.role === 'instructor' || c.role === 'owner';
+                
+                card.innerHTML = `
+                    <div class="flex justify-between items-start mb-2">
+                        <h3 class="text-xl font-bold font-serif text-gray-800 break-words flex-1 pr-2">${c.name}</h3>
+                        <div class="flex items-center gap-2">
+                            ${c.role === 'owner' || currentUser.role === 'admin' ? `
+                            <button onclick="event.stopPropagation(); deleteClass(${c.id}, '${c.name.replace(/'/g, "\\'")}')" class="text-gray-400 hover:text-red-500 transition-colors" title="Delete Class">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                            </button>
+                            ` : ''}
+                            <span class="px-2 py-1 bg-gray-100 text-xs font-semibold rounded ${isInstructor ? 'text-purple-700' : 'text-gray-600'}">
+                                ${c.role.toUpperCase()}
+                            </span>
+                        </div>
+                    </div>
+                    ${isInstructor ? `
+                    <div class="mt-2 mb-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
+                        <div class="flex justify-between items-center mb-1">
+                            <span class="text-xs font-semibold text-gray-500 uppercase">Join Code</span>
+                            <button onclick="event.stopPropagation(); rotateClassCode(${c.id})" class="text-xs text-primary hover:text-primary-dark font-medium flex items-center gap-1 transition-colors">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                                Rotate
+                            </button>
+                        </div>
+                        <div class="font-mono text-center text-sm font-bold text-gray-800 bg-white px-2 py-1 rounded border border-gray-300">
+                            <span id="join-code-display-${c.id}">${c.code || 'Hidden'}</span>
+                        </div>
+                    </div>
+                    ` : ''}
+                    <div class="mt-auto pt-4 flex gap-2">
+                        ${isInstructor ? `
+                        <button onclick="event.stopPropagation(); openTAModal(${c.id}, '${c.name.replace(/'/g, "\\'")}')" class="btn-secondary text-sm px-3 py-1 flex-1 border border-primary text-primary hover:bg-primary-50">
+                            Manage TAs
+                        </button>
+                        <button onclick="event.stopPropagation(); openRosterModal(${c.id}, '${c.name.replace(/'/g, "\\'")}', '${c.role}')" class="btn-primary text-sm px-3 py-1 flex-1 border border-primary">
+                            Roster
+                        </button>
+                        ` : `
+                        <button onclick="event.stopPropagation(); document.getElementById('active-class-selector').value = '${c.id}'; switchActiveClass(); showDashboardView();" class="btn-secondary text-sm px-3 py-1 flex-1">
+                            Q&A
+                        </button>
+                        `}
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+        
+        if (currentUser.role === 'instructor' || currentUser.role === 'admin') {
+            document.getElementById('create-class-btn').classList.remove('hidden');
+            document.getElementById('create-class-btn').classList.add('flex');
+        } else {
+            document.getElementById('create-class-btn').classList.add('hidden');
+            document.getElementById('create-class-btn').classList.remove('flex');
+        }
+
+    } catch (error) {
+        showNotification('Failed to load classes: ' + error.message, 'error');
+    }
+}
+
+async function switchActiveClass() {
+    const selector = document.getElementById('active-class-selector');
+    if (!selector.value) return;
+    
+    currentClassId = parseInt(selector.value);
+    
+    if (document.getElementById('dashboard-view').classList.contains('hidden') &&
+        document.getElementById('kb-view').classList.contains('hidden')) {
+        // If they are in settings, maybe don't force a swap, just load questions in background.
+        await loadQuestions();
+    } else {
+        // Force refresh of the current view
+        if (!document.getElementById('dashboard-view').classList.contains('hidden')) {
+            await loadQuestions();
+        } else if (!document.getElementById('kb-view').classList.contains('hidden')) {
+            await loadKnowledgeBases();
+        }
+    }
+}
+
+// Join Class Modal
+function showJoinClassModal() {
+    document.getElementById('join-class-code').value = '';
+    document.getElementById('join-class-modal').classList.remove('hidden');
+}
+
+function closeJoinClassModal() {
+    document.getElementById('join-class-modal').classList.add('hidden');
+}
+
+document.getElementById('join-class-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const code = document.getElementById('join-class-code').value;
+    try {
+        showLoading();
+        const res = await apiCall('/classes/join', {
+            method: 'POST',
+            body: JSON.stringify({ code })
+        });
+        showNotification(res.message, 'success');
+        
+        if (res.class_id) {
+            currentClassId = res.class_id;
+        }
+        
+        closeJoinClassModal();
+        loadClasses();
+    } catch (error) {
+        showNotification('Error joining class: ' + error.message, 'error');
+    } finally {
+        hideLoading();
+    }
+});
+
+// Create Class Modal
+function showCreateClassModal() {
+    document.getElementById('create-class-name').value = '';
+    document.getElementById('create-class-success').classList.add('hidden');
+    document.getElementById('create-class-form').classList.remove('hidden');
+    document.getElementById('create-class-modal').classList.remove('hidden');
+}
+
+function closeCreateClassModal() {
+    document.getElementById('create-class-modal').classList.add('hidden');
+}
+
+document.getElementById('create-class-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = document.getElementById('create-class-name').value;
+    try {
+        showLoading();
+        const res = await apiCall('/classes', {
+            method: 'POST',
+            body: JSON.stringify({ name })
+        });
+        
+        // Show success context
+        document.getElementById('create-class-form').classList.add('hidden');
+        const successDiv = document.getElementById('create-class-success');
+        successDiv.classList.remove('hidden');
+        document.getElementById('new-class-join-code').textContent = res.code;
+        
+        if (res.id) {
+            currentClassId = res.id;
+        }
+        
+        loadClasses();
+    } catch (error) {
+        showNotification('Error creating class: ' + error.message, 'error');
+    } finally {
+        hideLoading();
+    }
+});
+
+async function deleteClass(classId, className) {
+    if (!confirm(`Are you absolutely sure you want to delete the class "${className}"? This action cannot be undone and will delete all enrollments and related data.`)) {
+        return;
+    }
+    
+    try {
+        showLoading();
+        const res = await apiCall(`/classes/${classId}`, {
+            method: 'DELETE'
+        });
+        showNotification(res.message, 'success');
+        loadClasses();
+    } catch (error) {
+        showNotification('Error deleting class: ' + error.message, 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+async function openRosterModal(classId, className, currentRole) {
+    currentRosterClassId = classId;
+    document.getElementById('roster-modal').classList.remove('hidden');
+    document.getElementById('roster-modal-title').textContent = `Roster: ${className}`;
+    
+    // Display join code
+    const targetClass = enrolledClasses.find(c => c.id == classId);
+    if (targetClass) {
+        document.getElementById('current-join-code-span').textContent = targetClass.code || 'Hidden';
+    }
+    
+    const actionsEl = document.getElementById('roster-actions');
+    const isStaff = currentRole === 'instructor' || currentRole === 'owner';
+    if (isStaff) {
+        actionsEl.classList.remove('hidden');
+    } else {
+        actionsEl.classList.add('hidden');
+    }
+    
+    await loadRoster(classId, currentRole);
+}
+
+function closeRosterModal() {
+    document.getElementById('roster-modal').classList.add('hidden');
+    currentRosterClassId = null;
+}
+
+// TA Management Modal Logic
+async function openTAModal(classId, className) {
+    currentRosterClassId = classId;
+    document.getElementById('ta-modal').classList.remove('hidden');
+    document.getElementById('ta-modal-title').textContent = `Manage TAs: ${className}`;
+    await loadTAs(classId);
+}
+
+function closeTAModal() {
+    document.getElementById('ta-modal').classList.add('hidden');
+    document.getElementById('new-ta-email').value = '';
+}
+
+document.getElementById('add-ta-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!currentRosterClassId) return;
+    
+    const email = document.getElementById('new-ta-email').value;
+    try {
+        await apiCall(`/classes/${currentRosterClassId}/tas`, {
+            method: 'POST',
+            body: JSON.stringify({ email })
+        });
+        showNotification('TA added successfully', 'success');
+        document.getElementById('new-ta-email').value = '';
+        await loadTAs(currentRosterClassId);
+    } catch (error) {
+        showNotification('Error adding TA: ' + error.message, 'error');
+    }
+});
+
+async function loadTAs(classId) {
+    const tbody = document.getElementById('ta-table-body');
+    const loading = document.getElementById('ta-loading');
+    
+    tbody.innerHTML = '';
+    loading.classList.remove('hidden');
+    
+    try {
+        const res = await apiCall(`/classes/${classId}/tas`);
+        loading.classList.add('hidden');
+        
+        if (res.tas.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="2" class="text-center py-4 text-gray-500">No pre-approved TAs</td></tr>`;
+            return;
+        }
+        
+        res.tas.forEach(ta => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td class="px-4 py-3 border-b">${ta.email}</td>
+                <td class="px-4 py-3 border-b text-right flex justify-end">
+                    <button onclick="removeTA('${ta.email}')" class="text-error hover:text-red-700 bg-red-50 hover:bg-red-100 p-1.5 rounded transition-colors" title="Remove TA">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                    </button>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (error) {
+        loading.classList.add('hidden');
+        tbody.innerHTML = `<tr><td colspan="2" class="text-center py-4 text-error">${error.message}</td></tr>`;
+    }
+}
+
+async function removeTA(email) {
+    if (!currentRosterClassId) return;
+    if (!confirm(`Are you sure you want to remove ${email} from the TA allowlist?`)) return;
+    
+    try {
+        await apiCall(`/classes/${currentRosterClassId}/tas/${encodeURIComponent(email)}`, {
+            method: 'DELETE'
+        });
+        showNotification('TA removed', 'success');
+        await loadTAs(currentRosterClassId);
+    } catch (error) {
+        showNotification('Error removing TA: ' + error.message, 'error');
+    }
+}
+
+let currentRosterData = [];
+let currentRosterRole = null;
+let currentSortCol = 'name';
+let currentSortDesc = false;
+
+async function loadRoster(classId, currentRole) {
+    const tbody = document.getElementById('roster-table-body');
+    const loading = document.getElementById('roster-loading');
+    
+    tbody.innerHTML = '';
+    loading.classList.remove('hidden');
+    
+    try {
+        const res = await apiCall(`/classes/${classId}/roster`);
+        currentRosterData = res.roster;
+        currentRosterRole = currentRole;
+        
+        loading.classList.add('hidden');
+        renderRosterList();
+        
+    } catch (error) {
+        loading.classList.add('hidden');
+        tbody.innerHTML = `<tr><td colspan="4" class="text-center py-4 text-error">${error.message}</td></tr>`;
+    }
+}
+
+function sortRoster(col) {
+    if (currentSortCol === col) {
+        currentSortDesc = !currentSortDesc;
+    } else {
+        currentSortCol = col;
+        currentSortDesc = false;
+    }
+    renderRosterList();
+}
+
+function renderRosterList() {
+    const tbody = document.getElementById('roster-table-body');
+    const searchTerm = document.getElementById('roster-search')?.value.toLowerCase() || '';
+    
+    // Reset sort icons
+    document.getElementById('sort-icon-name').textContent = '';
+    document.getElementById('sort-icon-email').textContent = '';
+    document.getElementById('sort-icon-role').textContent = '';
+    
+    const iconEl = document.getElementById(`sort-icon-${currentSortCol}`);
+    if (iconEl) {
+        iconEl.textContent = currentSortDesc ? '▼' : '▲';
+    }
+    
+    let filtered = currentRosterData;
+    if (searchTerm) {
+        filtered = currentRosterData.filter(u => 
+            (u.full_name && u.full_name.toLowerCase().includes(searchTerm)) ||
+            (u.email && u.email.toLowerCase().includes(searchTerm))
+        );
+    }
+    
+    filtered.sort((a, b) => {
+        let valA = a[currentSortCol === 'name' ? 'full_name' : currentSortCol] || '';
+        let valB = b[currentSortCol === 'name' ? 'full_name' : currentSortCol] || '';
+        
+        if (currentSortCol === 'role') {
+            valA = a.class_role || '';
+            valB = b.class_role || '';
+        }
+        
+        valA = valA.toLowerCase();
+        valB = valB.toLowerCase();
+        
+        if (valA < valB) return currentSortDesc ? 1 : -1;
+        if (valA > valB) return currentSortDesc ? -1 : 1;
+        return 0;
+    });
+    
+    tbody.innerHTML = '';
+    
+    if (filtered.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="4" class="text-center py-4 text-gray-500">No users found</td></tr>`;
+        return;
+    }
+    
+    filtered.forEach(user => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td class="px-4 py-3 border-b">${user.full_name || 'N/A'}</td>
+            <td class="px-4 py-3 border-b">${user.email}</td>
+            <td class="px-4 py-3 border-b">
+                <span class="px-2 py-1 rounded text-xs font-semibold 
+                    ${user.class_role === 'owner' ? 'bg-amber-100 text-amber-800' :
+                      user.class_role === 'instructor' ? 'bg-purple-100 text-purple-800' : 
+                      user.class_role === 'ta' ? 'bg-blue-100 text-blue-800' : 
+                      'bg-gray-100 text-gray-800'}">
+                    ${user.class_role.toUpperCase()}
+                </span>
+            </td>
+            <td class="px-4 py-3 border-b text-right">
+                ${(currentRosterRole === 'owner' || currentRosterRole === 'instructor') && user.class_role !== 'owner' ? `
+                    <select onchange="setClassRole(${user.user_id}, this.value)" class="text-sm border rounded px-2 py-1 bg-white focus:ring-1 focus:ring-primary focus:border-primary" ${currentRosterRole === 'instructor' && user.class_role === 'instructor' ? 'disabled' : ''}>
+                        <option value="student" ${user.class_role === 'student' ? 'selected' : ''}>Student</option>
+                        <option value="ta" ${user.class_role === 'ta' ? 'selected' : ''}>TA</option>
+                        ${currentRosterRole === 'owner' || currentUser.role === 'admin' ? `<option value="instructor" ${user.class_role === 'instructor' ? 'selected' : ''}>Instructor</option>` : ''}
+                    </select>
+                ` : ''}
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+async function setClassRole(userId, newRole) {
+    if (!currentRosterClassId) return;
+    try {
+        await apiCall(`/classes/${currentRosterClassId}/set-role`, {
+            method: 'POST',
+            body: JSON.stringify({ user_id: userId, class_role: newRole })
+        });
+        showNotification('Role updated successfully', 'success');
+        // Reload roster to reflect changes
+        loadRoster(currentRosterClassId, true);
+    } catch (error) {
+        showNotification('Failed to update role: ' + error.message, 'error');
+        // Reload to revert select element if it failed
+        loadRoster(currentRosterClassId, true);
+    }
+}
+
+async function rotateClassCode(classId = null) {
+    const targetId = classId || currentRosterClassId;
+    if (!targetId) return;
+    if (!confirm("Are you sure you want to rotate the join code? The old code will immediately stop working.")) return;
+    
+    try {
+        const res = await apiCall(`/classes/${targetId}/rotate-code`, {
+            method: 'POST'
+        });
+        
+        const displaySpan = document.getElementById(`join-code-display-${targetId}`);
+        if (displaySpan) displaySpan.textContent = res.join_code;
+        
+        const currentModalSpan = document.getElementById('current-join-code-span');
+        if (currentModalSpan) currentModalSpan.textContent = res.join_code;
+        
+        alert(`New Join Code generated!\n\nJOIN CODE: ${res.join_code}\n\nWARNING: Copy this now. It will not be shown again.`);
+    } catch (error) {
+        showNotification('Failed to rotate code: ' + error.message, 'error');
+    }
+}
+
+
+document.getElementById('update-email-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('update-email-error');
+    errorEl.classList.add('hidden');
+    
+    const new_email = document.getElementById('update-new-email').value;
+    const password = document.getElementById('update-email-password').value;
+    
+    if (!new_email.toLowerCase().endsWith('@purdue.edu')) {
+        errorEl.textContent = 'Email must be a @purdue.edu address';
+        errorEl.classList.remove('hidden');
+        return;
+    }
+    
+    try {
+        showLoading();
+        const res = await apiCall('/account/update-email', {
+            method: 'POST',
+            body: JSON.stringify({ new_email, password })
+        });
+        
+        // On success, the token is invalidated, we must force logout and show verify view.
+        clearToken();
+        disconnectWebSocket();
+        showAuthView();
+        
+        document.getElementById('update-new-email').value = '';
+        document.getElementById('update-email-password').value = '';
+        
+        alert("Email update initiated! " + res.message);
+        
+    } catch (error) {
+        errorEl.textContent = error.message;
+        errorEl.classList.remove('hidden');
+    } finally {
+        hideLoading();
+    }
+});
+
+
+// ============================================================================
 // Event Listeners
 // ============================================================================
 
@@ -1463,26 +2097,42 @@ document.getElementById('register-form').addEventListener('submit', async (e) =>
     
     const email = document.getElementById('register-email').value;
     const password = document.getElementById('register-password').value;
+    const intent = document.getElementById('register-role').value;
+    
+    if (!email.toLowerCase().endsWith('@purdue.edu')) {
+        showError('register-error', 'Email must be a @purdue.edu address');
+        return;
+    }
     
     try {
         showLoading();
-        await apiCall('/register', {
+        const res = await apiCall('/register', {
             method: 'POST',
-            body: JSON.stringify({ email, password })
+            body: JSON.stringify({ email, password, intent })
         });
         
-        const loginData = await apiCall('/login', {
-            method: 'POST',
-            body: JSON.stringify({ email, password })
-        });
-        
-        setToken(loginData.access_token);
-        await loadCurrentUser();
+        document.getElementById('register-form').classList.add('hidden');
+        if (res.requires_verification === false) {
+            const loginRes = await apiCall('/login', {
+                method: 'POST',
+                body: JSON.stringify({ email, password })
+            });
+            setToken(loginRes.access_token);
+            await loadCurrentUser();
+        } else {
+            document.getElementById('register-success-view').classList.remove('hidden');
+        }
     } catch (error) {
         showError('register-error', error.message);
     } finally {
         hideLoading();
     }
+});
+
+document.getElementById('show-login-from-success')?.addEventListener('click', () => {
+    document.getElementById('show-login').click();
+    document.getElementById('register-success-view').classList.add('hidden');
+    document.getElementById('login-form').classList.remove('hidden');
 });
 
 document.getElementById('logout-btn').addEventListener('click', () => {
@@ -1509,11 +2159,39 @@ document.getElementById('search-questions')?.addEventListener('input', (e) => {
 // Initialize
 // ============================================================================
 
-if (getToken()) {
-    loadCurrentUser();
-} else {
-    showAuthView();
+async function init() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const verifyToken = urlParams.get('token');
+    const verifyEmail = urlParams.get('email');
+    
+    if (verifyToken && verifyEmail) {
+        document.getElementById('auth-view').classList.add('hidden');
+        document.getElementById('verify-view').classList.remove('hidden');
+        
+        try {
+            await apiCall('/verify-email', {
+                method: 'POST',
+                body: JSON.stringify({ email: verifyEmail, token: verifyToken })
+            });
+            
+            document.getElementById('verify-loading').classList.add('hidden');
+            document.getElementById('verify-success').classList.remove('hidden');
+        } catch (error) {
+            document.getElementById('verify-loading').classList.add('hidden');
+            document.getElementById('verify-error').classList.remove('hidden');
+            document.getElementById('verify-error-msg').textContent = error.message;
+        }
+        return;
+    }
+    
+    if (getToken()) {
+        loadCurrentUser();
+    } else {
+        showAuthView();
+    }
 }
+
+init();
 
 function showUploadSummaryModal(total, success, failedFiles, onContextClose) {
     const modal = document.createElement('div');

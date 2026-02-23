@@ -18,7 +18,7 @@ async def send_verification_email(email: str, token: str) -> bool:
     logger.info(f"Subject: Please verify your ChiPT account")
     logger.info(f"Body: Use the following token to verify your account or click the link:")
     logger.info(f"      Token: {token}")
-    logger.info(f"      Link:  http://localhost:8000/api/verify-email?token={token}&email={email}") # Example frontend link
+    logger.info(f"      Link:  http://localhost:8000/?token={token}&email={email}")
     logger.info(f"=============================================")
     
     # Simulate email sending delay

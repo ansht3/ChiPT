@@ -14,8 +14,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy import select
 
-from project.database import User, GlobalRole, AuditLog, normalize_email
-from project.config import DATABASE_URL
+from database import User, GlobalRole, AuditLog, normalize_email
+from config import DATABASE_URL
 
 async def approve_instructor(email: str):
     engine = create_async_engine(DATABASE_URL, echo=False)

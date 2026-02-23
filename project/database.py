@@ -19,6 +19,7 @@ class ClassRole(enum.Enum):
     student = "student"
     ta = "ta"
     instructor = "instructor"
+    owner = "owner"
 
 def normalize_email(email: str) -> str:
     """Normalize email address by stripping whitespace and converting to lowercase."""
@@ -74,6 +75,7 @@ class Class(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255))
     code: Mapped[str] = mapped_column(String(50), nullable=True)
+    kb_name: Mapped[str] = mapped_column(String(255), nullable=True)
     join_code_hash: Mapped[str] = mapped_column(String(255), nullable=True)
     created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -130,6 +132,7 @@ class Question(Base):
     
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    class_id: Mapped[int] = mapped_column(ForeignKey("classes.id"), nullable=True)
     content: Mapped[str] = mapped_column(Text)
     status: Mapped[QuestionStatus] = mapped_column(SQLEnum(QuestionStatus), default=QuestionStatus.pending)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

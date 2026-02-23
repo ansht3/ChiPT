@@ -6,6 +6,9 @@ from fastapi.security import HTTPBearer
 from fastapi.security.http import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+import os
+
+REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "False").lower() == "true"
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -92,7 +95,7 @@ async def get_current_user(
 
 async def require_verified_user(current_user = Depends(get_current_user)):
     """Require that the current user has verified their email."""
-    if not current_user.email_verified:
+    if REQUIRE_EMAIL_VERIFICATION and not current_user.email_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email verification required. Please check your email inbox to verify your account."
