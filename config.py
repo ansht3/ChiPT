@@ -53,6 +53,11 @@ AI_API_URL = os.getenv("AI_API_URL", "http://localhost:8901/generate")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./qa_system.db")
 
 # -----------------------------
+# Milvus API Service
+# -----------------------------
+MILVUS_API_URL = os.getenv("MILVUS_API_URL", "http://localhost:8903")
+
+# -----------------------------
 # Other Services
 # -----------------------------
 MAIN_QA_URL = os.getenv("MAIN_QA_URL", "http://localhost:8000")

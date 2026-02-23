@@ -7,6 +7,7 @@ from typing import Optional, List
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
+    intent: Optional[str] = None  # E.g., 'instructor'
 
 
 class RegisterResponse(BaseModel):
@@ -27,6 +28,45 @@ class UserResponse(BaseModel):
     id: int
     email: str
     role: str
+
+class VerifyEmailRequest(BaseModel):
+    email: EmailStr
+    token: str
+
+class UpdateEmailRequest(BaseModel):
+    new_email: EmailStr
+    password: str
+
+# Class Schemas
+class ClassCreateRequest(BaseModel):
+    name: str
+
+class ClassResponse(BaseModel):
+    id: int
+    name: str
+    code: Optional[str] = None
+    created_at: datetime
+    
+class RotateCodeResponse(BaseModel):
+    join_code: str
+
+class JoinClassRequest(BaseModel):
+    code: str
+
+class RosterUserResponse(BaseModel):
+    user_id: int
+    email: str
+    full_name: Optional[str] = None
+    class_role: str
+    joined_at: datetime
+
+class RosterResponse(BaseModel):
+    class_id: int
+    roster: List[RosterUserResponse]
+
+class SetRoleRequest(BaseModel):
+    user_id: int
+    class_role: str
 
 
 # Question Schemas

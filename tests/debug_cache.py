@@ -7,6 +7,12 @@ Tests the cache service and helps diagnose issues.
 import httpx
 import asyncio
 import json
+import os
+import sys
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../project')))
+
 from config import CACHE_SERVICE_URL
 
 # CACHE_URL = "http://localhost:8902"

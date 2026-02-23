@@ -1,3 +1,8 @@
+"""
+Test File: Test_api.py
+Description: Validates the LLM endpoints (generation and embeddings) directly from the proxy / Ollama services.
+How it is tested: Executes a suite of static user prompts targeting standard text completion as well as comparing intra-model cosine similarity scoring of embeddings from the proxy vs a local direct Ollama endpoint.
+"""
 import argparse
 import numpy as np
 import requests

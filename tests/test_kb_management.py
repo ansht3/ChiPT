@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+Test File: test_kb_management.py
+Description: Tests the API interactions required for an instructor to manage their Knowledge Bases (KBs).
+How it is tested: Imitates an authenticated instructor over HTTP requests to create a mock KB, upload a simulated `.txt` file parsing multipart data, retrieve KB source details, and completely delete the file, asserting HTTP status codes.
+"""
 import asyncio
 import httpx
 import os

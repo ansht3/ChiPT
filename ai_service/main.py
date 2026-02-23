@@ -16,17 +16,7 @@ import os
 # Add parent directory to sys.path to allow importing config
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from rag_api.rag_main_kdocs import rag_answer
-from rag_api.vector_database_handling import (
-    VectorDatabaseManager, 
-    create_kb_dir, 
-    get_kb_path, 
-    list_knowledge_bases,
-    get_kb_path, 
-    list_knowledge_bases,
-    COLLECTION_NAME_DEFAULT,
-    FILE_UUID_FIELD
-)
-from config import OPENAI_BASE_URL, OPENAI_API_KEY, CHAT_COMPLETION_MODEL
+from config import OPENAI_BASE_URL, OPENAI_API_KEY, CHAT_COMPLETION_MODEL, MILVUS_API_URL
 
 # Load environment varaibles from .env file
 load_dotenv()
@@ -38,6 +28,42 @@ app = FastAPI(title="AI Answer Service")
 
 # See config.py for OPENAI_BASE_URL and OPENAI_API_KEY settings
 REQUEST_TIMEOUT = 120.0  # Increased for large models
+
+_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rag_api", "knowledge-bases")
+
+def _kb_dir(name: str) -> str:
+    """Return the knowledge-base directory path (shared filesystem with Milvus API)."""
+    return os.path.join(_DATA_DIR, name)
+
+def _list_knowledge_bases() -> list[str]:
+    """List KB directory names under _DATA_DIR (pure filesystem)."""
+    if not os.path.exists(_DATA_DIR):
+        return []
+    return sorted(
+        n for n in os.listdir(_DATA_DIR)
+        if os.path.isdir(os.path.join(_DATA_DIR, n))
+    )
+
+async def _resolve_doc_path(name: str, file_uuid: str) -> str:
+    """Look up a document's source file via the Milvus API, with KB-dir fallback."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(f"{MILVUS_API_URL}/file_by_uuid/{name}/{file_uuid}")
+
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail="Document UUID not found in database")
+    resp.raise_for_status()
+
+    source_path = resp.json().get("source_path")
+    if not source_path:
+        raise HTTPException(status_code=404, detail="Document UUID not found in database")
+
+    if not os.path.exists(source_path):
+        potential_path = os.path.join(_kb_dir(name), os.path.basename(source_path))
+        if os.path.exists(potential_path):
+            return potential_path
+        raise HTTPException(status_code=404, detail=f"Document file not found: {source_path}")
+
+    return source_path
 
 
 class ContextPair(BaseModel):
@@ -186,19 +212,24 @@ async def generate_answer(request: GenerateRequest):
 @app.get("/kbs", response_model=KBListResponse)
 async def list_kbs():
     """List available knowledge bases."""
-    kbs = list_knowledge_bases()
-    return KBListResponse(kbs=kbs)
+    return KBListResponse(kbs=_list_knowledge_bases())
 
 @app.post("/kbs", status_code=201)
 async def create_kb(request: KBCreateRequest):
-    """Create a new knowledge base."""
+    """Create a new knowledge base (directory + Milvus .db + collection)."""
     try:
-        # Check if already exists
-        if request.name in list_knowledge_bases():
-             raise HTTPException(status_code=400, detail="Knowledge Base already exists")
-        
-        create_kb_dir(request.name)
+        if request.name in _list_knowledge_bases():
+            raise HTTPException(status_code=400, detail="Knowledge Base already exists")
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{MILVUS_API_URL}/create_kb",
+                json={"name": request.name},
+            )
+        resp.raise_for_status()
         return {"message": f"Knowledge Base '{request.name}' created successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating KB: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -207,21 +238,12 @@ async def create_kb(request: KBCreateRequest):
 async def get_kb_details(name: str):
     """Get details of a knowledge base (list files)."""
     try:
-        db_path = get_kb_path(name)
-        # We need to construct the manager to list files
-        # Alternatively, we could read from the file system if we just want raw files?
-        # But 'add_documents' copies them to processed_docs or just chunks them. 
-        # The DB keeps track of source files. Let's use the DB as source of truth.
-        
-        # NOTE: This connects to the DB, which might be slow or lock if in use.
-        # But VectorDatabaseManager handles connection and locking.
-        manager = VectorDatabaseManager(db_path, collection_name=COLLECTION_NAME_DEFAULT)
-        # We might need to handle case where DB file doesn't exist yet (empty KB)
-        if not os.path.exists(db_path):
-             return KBDetailsResponse(name=name, files=[])
-
-        files = manager.get_file_list()
-        return KBDetailsResponse(name=name, files=files)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{MILVUS_API_URL}/list_files/{name}")
+        if resp.status_code == 404:
+            return KBDetailsResponse(name=name, files=[])
+        resp.raise_for_status()
+        return KBDetailsResponse(name=name, files=resp.json()["files"])
     except Exception as e:
         logger.error(f"Error reading KB details: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -229,31 +251,28 @@ async def get_kb_details(name: str):
 @app.post("/kbs/{name}/files", status_code=201)
 async def upload_file_to_kb(name: str, file: UploadFile = File(...)):
     """Upload a file to a knowledge base."""
-    # check valid file extension
     if not (file.filename.endswith(".txt") or file.filename.endswith(".md") or file.filename.endswith(".pdf")):
          raise HTTPException(status_code=400, detail="Only .txt, .md, and .pdf files are supported")
 
     try:
-        # Verify KB exists
-        if name not in list_knowledge_bases():
-             raise HTTPException(status_code=404, detail="Knowledge Base not found")
-        
-        db_path = get_kb_path(name)
-        kb_dir = os.path.dirname(db_path)
-        
-        # Save file temporarily to disk (in the KB folder so it persists as 'source')
-        # User requirement: "inside should have all of the files"
-        # So we save the original file to ai_service/rag_api/knowledge-bases/{name}/{filename}
-        
+        if not os.path.isdir(_kb_dir(name)):
+            raise HTTPException(status_code=404, detail="Knowledge Base not found")
+
+        kb_dir = _kb_dir(name)
         file_path = os.path.join(kb_dir, file.filename)
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-            
-        # Update Vector DB
-        manager = VectorDatabaseManager(db_path, collection_name=COLLECTION_NAME_DEFAULT)
-        manager.add_documents([file_path])
-        
+
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            resp = await client.post(
+                f"{MILVUS_API_URL}/add_documents",
+                json={"kb_name": name, "file_paths": [file_path]},
+            )
+        resp.raise_for_status()
+
         return {"message": f"File '{file.filename}' added to KB '{name}'"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error adding file to KB: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -262,24 +281,24 @@ async def upload_file_to_kb(name: str, file: UploadFile = File(...)):
 async def delete_file_from_kb(name: str, request: KBFileDeleteRequest):
     """Remove a file from a knowledge base."""
     try:
-        db_path = get_kb_path(name)
-        manager = VectorDatabaseManager(db_path, collection_name=COLLECTION_NAME_DEFAULT)
-        
-        # remove_document expects absolute path, but we might store relative or absolute?
-        # In upload, we saved to `kb_dir/filename` and passed that absolute path.
-        # So manager has the absolute path.
-        # We need to reconstruct the path from the filename.
-        
-        kb_dir = os.path.dirname(db_path)
+        kb_dir = _kb_dir(name)
         file_path = os.path.join(kb_dir, request.filename)
-        
-        manager.remove_document(file_path)
-        
-        # Also remove the physical source file if it exists
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.request(
+                "DELETE",
+                f"{MILVUS_API_URL}/remove_document",
+                json={"kb_name": name, "filename": file_path},
+            )
+        if resp.status_code not in (200, 404):
+            resp.raise_for_status()
+
         if os.path.exists(file_path):
             os.remove(file_path)
-            
+
         return {"message": f"File '{request.filename}' removed from KB '{name}'"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error removing file from KB: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -288,30 +307,7 @@ async def delete_file_from_kb(name: str, request: KBFileDeleteRequest):
 async def get_kb_document(name: str, file_uuid: str):
     logger.info(f"Attempting to retrieve document: KB='{name}', UUID='{file_uuid}'")
     try:
-        db_path = get_kb_path(name)
-        logger.info(f"Resolved DB path: {db_path}")
-        
-        manager = VectorDatabaseManager(db_path, collection_name=COLLECTION_NAME_DEFAULT)
-        
-        source_path = manager.get_file_path_by_uuid(file_uuid)
-        logger.info(f"Resolved source path from DB: {source_path}")
-        
-        if not source_path:
-             logger.error(f"UUID '{file_uuid}' not found in DB '{name}'")
-             raise HTTPException(status_code=404, detail="Document UUID not found in database")
-             
-        if not os.path.exists(source_path):
-            logger.error(f"File not found on disk: {source_path}")
-            # Fallback: check if it's in the KB directory
-            kb_dir = os.path.dirname(db_path)
-            potential_path = os.path.join(kb_dir, os.path.basename(source_path))
-            logger.info(f"Checking fallback path: {potential_path}")
-            if os.path.exists(potential_path):
-                source_path = potential_path
-                logger.info(f"Found at fallback path: {source_path}")
-            else:
-                raise HTTPException(status_code=404, detail=f"Document file not found: {source_path}")
-            
+        source_path = await _resolve_doc_path(name, file_uuid)
         return FileResponse(source_path)
     except HTTPException:
         raise
@@ -323,31 +319,8 @@ async def get_kb_document(name: str, file_uuid: str):
 async def get_kb_document_view(name: str, file_uuid: str):
     print(f"DEBUG: Viewing document: KB='{name}', UUID='{file_uuid}'")
     try:
-        db_path = get_kb_path(name)
-        print(f"DEBUG: DB Path: {db_path}")
-        
-        manager = VectorDatabaseManager(db_path, collection_name=COLLECTION_NAME_DEFAULT)
-        
-        source_path = manager.get_file_path_by_uuid(file_uuid)
+        source_path = await _resolve_doc_path(name, file_uuid)
         print(f"DEBUG: Resolved source path: {source_path}")
-        
-        if not source_path:
-             print("DEBUG: UUID not found in DB")
-             raise HTTPException(status_code=404, detail="Document UUID not found")
-             
-        if not os.path.exists(source_path):
-             print(f"DEBUG: File not found at {source_path}")
-             # Try fallback
-             kb_dir = os.path.dirname(db_path)
-             potential_path = os.path.join(kb_dir, os.path.basename(source_path))
-             print(f"DEBUG: Checking fallback: {potential_path}")
-             
-             if os.path.exists(potential_path):
-                 source_path = potential_path
-                 print(f"DEBUG: Found at fallback: {source_path}")
-             else:
-                 print("DEBUG: Fallback failed")
-                 raise HTTPException(status_code=404, detail="File not found")
 
         # Check for PDF
         # Check for PDF
@@ -837,28 +810,11 @@ async def get_kb_document_view(name: str, file_uuid: str):
 async def download_kb_document(name: str, file_uuid: str):
     """Download a document file (Always Attachment)."""
     try:
-        db_path = get_kb_path(name)
-        manager = VectorDatabaseManager(db_path, collection_name=COLLECTION_NAME_DEFAULT)
-        
-        source_path = manager.get_file_path_by_uuid(file_uuid)
-        print(f"DEBUG: Download requested for UUID {file_uuid}")
-        
-        if not source_path:
-             raise HTTPException(status_code=404, detail="Document UUID not found")
-
-        # Fallback logic
-        if not os.path.exists(source_path):
-             kb_dir = os.path.dirname(db_path)
-             potential_path = os.path.join(kb_dir, os.path.basename(source_path))
-             if os.path.exists(potential_path):
-                 source_path = potential_path
-             else:
-                 raise HTTPException(status_code=404, detail="Document not found")
-            
+        source_path = await _resolve_doc_path(name, file_uuid)
         return FileResponse(
-            source_path, 
+            source_path,
             filename=os.path.basename(source_path),
-            content_disposition_type="attachment"
+            content_disposition_type="attachment",
         )
     except HTTPException:
         raise
@@ -870,29 +826,12 @@ async def download_kb_document(name: str, file_uuid: str):
 async def get_kb_document_inline(name: str, file_uuid: str):
     """Serve document inline (for iframe viewing)."""
     try:
-        db_path = get_kb_path(name)
-        manager = VectorDatabaseManager(db_path, collection_name=COLLECTION_NAME_DEFAULT)
-        
-        source_path = manager.get_file_path_by_uuid(file_uuid)
-        
-        if not source_path:
-             raise HTTPException(status_code=404, detail="Document UUID not found")
-
-        # Fallback logic
-        if not os.path.exists(source_path):
-             kb_dir = os.path.dirname(db_path)
-             potential_path = os.path.join(kb_dir, os.path.basename(source_path))
-             if os.path.exists(potential_path):
-                 source_path = potential_path
-             else:
-                 raise HTTPException(status_code=404, detail="Document not found")
-
-        # Force inline display
+        source_path = await _resolve_doc_path(name, file_uuid)
         return FileResponse(
-            source_path, 
+            source_path,
             media_type='application/pdf',
             filename=os.path.basename(source_path),
-            content_disposition_type="inline"
+            content_disposition_type="inline",
         )
     except HTTPException:
         raise

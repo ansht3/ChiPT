@@ -28,12 +28,13 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 
-def create_access_token(user_id: int, role: str) -> str:
+def create_access_token(user_id: int, role: str, token_version: int = 1) -> str:
     """Create a JWT access token."""
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode = {
         "user_id": user_id,
         "role": role,
+        "token_version": token_version,
         "exp": expire
     }
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
@@ -59,6 +60,7 @@ async def get_current_user(
         token = credentials.credentials
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id: int = payload.get("user_id")
+        token_version: int = payload.get("token_version", 1)  # Default to 1 for older tokens
         
         if user_id is None:
             raise credentials_exception
@@ -74,6 +76,13 @@ async def get_current_user(
         
         if user is None:
             raise credentials_exception
+            
+        # Check if the token version matches the database
+        if user.token_version != token_version:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has been invalidated. Please log in again."
+            )
         
         return user
     
@@ -81,14 +90,74 @@ async def get_current_user(
     raise credentials_exception
 
 
-async def require_instructor(current_user = Depends(get_current_user)):
-    """Require that the current user is an instructor."""
-    user_role = current_user.role if isinstance(current_user.role, str) else current_user.role.value
-    
-    if user_role != "instructor":
+async def require_verified_user(current_user = Depends(get_current_user)):
+    """Require that the current user has verified their email."""
+    if not current_user.email_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only instructors can access this endpoint"
+            detail="Email verification required. Please check your email inbox to verify your account."
         )
-    
     return current_user
+
+
+def require_global_role(allowed_roles: list[str]):
+    """Factory dependency to require specific global roles."""
+    async def role_checker(current_user = Depends(require_verified_user)):
+        user_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
+        
+        if user_role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Only users with roles {allowed_roles} can access this endpoint"
+            )
+        return current_user
+    return role_checker
+
+
+# Legacy dependencies for backward compatibility (maps directly to new generalized one)
+require_instructor = require_global_role(["instructor", "admin"])
+
+
+def require_class_instructor(class_id: int):
+    """Dependency to require that the current user is an instructor for a specific class."""
+    async def role_checker(
+        current_user = Depends(require_verified_user),
+        # We need the db session to check enrollment, and we do the same pattern as get_current_user
+    ):
+        from database import get_db, Enrollment, ClassRole
+        
+        async for db in get_db():
+            result = await db.execute(
+                select(Enrollment).where(
+                    Enrollment.class_id == class_id,
+                    Enrollment.user_id == current_user.id
+                )
+            )
+            enrollment = result.scalar_one_or_none()
+            
+            # Global admins also get access
+            user_g_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
+            
+            if user_g_role == "admin":
+                return current_user
+                
+            if not enrollment:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You are not enrolled in this class."
+                )
+                
+            c_role = enrollment.class_role if isinstance(enrollment.class_role, str) else enrollment.class_role.value
+            if c_role != "instructor":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You must be an instructor of this class to perform this action."
+                )
+                
+            return current_user
+            
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database connection failed"
+        )
+    return role_checker

@@ -10,9 +10,21 @@ from config import DATABASE_URL
 logger = logging.getLogger(__name__)
 
 
-class UserRole(enum.Enum):
+class GlobalRole(enum.Enum):
     student = "student"
     instructor = "instructor"
+    admin = "admin"
+
+class ClassRole(enum.Enum):
+    student = "student"
+    ta = "ta"
+    instructor = "instructor"
+
+def normalize_email(email: str) -> str:
+    """Normalize email address by stripping whitespace and converting to lowercase."""
+    if not email:
+        return email
+    return email.strip().lower()
 
 
 class QuestionStatus(enum.Enum):
@@ -41,11 +53,76 @@ class User(Base):
     
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    full_name: Mapped[str] = mapped_column(String(255), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
-    role: Mapped[UserRole] = mapped_column(SQLEnum(UserRole), default=UserRole.student)
+    global_role: Mapped[GlobalRole] = mapped_column(SQLEnum(GlobalRole), default=GlobalRole.student)
+    email_verified: Mapped[bool] = mapped_column(default=False)
+    verify_token_hash: Mapped[str] = mapped_column(String(255), nullable=True)
+    verify_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    token_version: Mapped[int] = mapped_column(default=1)
+    is_instructor_pending: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     
     questions: Mapped[List["Question"]] = relationship("Question", back_populates="user")
+    classes_created: Mapped[List["Class"]] = relationship("Class", back_populates="creator")
+    enrollments: Mapped[List["Enrollment"]] = relationship("Enrollment", back_populates="user")
+
+
+class Class(Base):
+    __tablename__ = "classes"
+    
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    code: Mapped[str] = mapped_column(String(50), nullable=True)
+    join_code_hash: Mapped[str] = mapped_column(String(255), nullable=True)
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    join_code_rotated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    
+    creator: Mapped["User"] = relationship("User", back_populates="classes_created")
+    enrollments: Mapped[List["Enrollment"]] = relationship("Enrollment", back_populates="class_")
+    ta_allowlist: Mapped[List["TAAllowlist"]] = relationship("TAAllowlist", back_populates="class_")
+
+
+class Enrollment(Base):
+    __tablename__ = "enrollments"
+    
+    class_id: Mapped[int] = mapped_column(ForeignKey("classes.id"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    class_role: Mapped[ClassRole] = mapped_column(SQLEnum(ClassRole), default=ClassRole.student)
+    joined_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    
+    class_: Mapped["Class"] = relationship("Class", back_populates="enrollments")
+    user: Mapped["User"] = relationship("User", back_populates="enrollments")
+
+
+from sqlalchemy import UniqueConstraint
+
+class TAAllowlist(Base):
+    __tablename__ = "ta_allowlist"
+    
+    id: Mapped[int] = mapped_column(primary_key=True)
+    class_id: Mapped[int] = mapped_column(ForeignKey("classes.id"))
+    email: Mapped[str] = mapped_column(String(255))
+    
+    class_: Mapped["Class"] = relationship("Class", back_populates="ta_allowlist")
+    
+    __table_args__ = (
+        UniqueConstraint('class_id', 'email', name='uq_ta_allowlist_class_email'),
+    )
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+    
+    id: Mapped[int] = mapped_column(primary_key=True)
+    actor_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    target_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=True)
+    class_id: Mapped[int] = mapped_column(ForeignKey("classes.id"), nullable=True)
+    action: Mapped[str] = mapped_column(String(255))
+    old_value: Mapped[str] = mapped_column(Text, nullable=True)
+    new_value: Mapped[str] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class Question(Base):
@@ -121,12 +198,14 @@ async def seed_data():
             student = User(
                 email="student@purdue.edu",
                 password_hash=hash_password("password"),
-                role=UserRole.student
+                global_role=GlobalRole.student,
+                email_verified=True
             )
             instructor = User(
                 email="instructor@purdue.edu",
                 password_hash=hash_password("password"),
-                role=UserRole.instructor
+                global_role=GlobalRole.instructor,
+                email_verified=True
             )
             
             session.add(student)

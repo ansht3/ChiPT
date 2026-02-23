@@ -3,23 +3,22 @@ from __future__ import annotations
 import os
 import json
 from typing import List, Dict
-from collections import Counter #Used to check where chunking is originating from
+from collections import Counter
 from openai import OpenAI
+import httpx
 
-# Select GPU to run on
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-
-from .milvus_connect import ( 
-    _milvus_connect,
-    TEXT_FIELD, TITLE_FIELD, DOCID_FIELD, FILE_UUID_FIELD
+from config import (
+    OPENAI_BASE_URL, OPENAI_API_KEY, CHAT_COMPLETION_MODEL,
+    RAG_DOCS_EMBEDDING_MODEL, MILVUS_API_URL,
 )
 
-from .vector_database_handling import get_kb_path
+TEXT_FIELD = "text"
+TITLE_FIELD = "title"
+DOCID_FIELD = "doc_id"
+FILE_UUID_FIELD = "file_uuid"
+PATH_FIELD = "path"
 
-from config import OPENAI_BASE_URL, OPENAI_API_KEY, CHAT_COMPLETION_MODEL, RAG_DOCS_EMBEDDING_MODEL
-
-# See config.py for OPENAI_BASE_URL and OPENAI_API_KEY settings
-PATH_FIELD          = "path"
+MILVUS_SEARCH_TIMEOUT = 60.0
 
 SYSTEM_PROMPT = (
     fr"""System prompt: You are a helpful assistant that answers questions based solely on the provided context. Your role is to extract and synthesize information from the given context to provide accurate, relevant answers.
@@ -47,7 +46,6 @@ def _build_full_doc_context_from_paths(doc_infos: dict[str, dict],
     Combines selected documents into one large context chunk to get injected
     into the user message.
     """
-    lines = []
     blocks, used = [], 0
     for title in doc_infos:
         info = doc_infos[title]
@@ -58,9 +56,6 @@ def _build_full_doc_context_from_paths(doc_infos: dict[str, dict],
         
         txt = _read_file(path).strip()
         
-        # THE DECISION TREE DOCUMENT WILL BREAK THE CONTEXT GENERATION
-        # if title == "decision_tree_handson.md":
-        #     continue
         print(f"{title} has {_approx_tokens(txt)} tokens approximately")
         if not txt:
             continue
@@ -68,13 +63,8 @@ def _build_full_doc_context_from_paths(doc_infos: dict[str, dict],
         if used + tlen > budget_tokens:
             break
             
-        # Construct header with link if available
-        # Format: [Title](Link) so the AI can copy it, or just providing the Link for the AI to use.
-        # Let's provide it clearly: "Title: ... Link: ... Content: ..."
-        # Or keep the [Title] format but append the link info.
         header = f"[{title}]"
         if uuid and kb_name:
-            # We provide the URL so the LLM can create a markdown link: [Title](/kbs/{kb_name}/docs/{uuid}/view)
             url = f"/kbs/{kb_name}/docs/{uuid}/view"
             header += f" (Link: {url})"
             
@@ -85,10 +75,28 @@ def _build_full_doc_context_from_paths(doc_infos: dict[str, dict],
     return output
 
 def _embed_query(text: str) -> List[float]:
-    # Returns an embedding vector for the query
     client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
     resp = client.embeddings.create(model=RAG_DOCS_EMBEDDING_MODEL, input=text)
     return resp.data[0].embedding
+
+
+def _milvus_search(qvec: List[float], top_k: int,
+                   output_fields: List[str],
+                   kb_name: str = None) -> list:
+    """Call the Milvus API /search endpoint and return the hit list."""
+    resp = httpx.post(
+        f"{MILVUS_API_URL}/search",
+        json={
+            "kb_name": kb_name,
+            "vector": qvec,
+            "limit": top_k,
+            "output_fields": output_fields,
+        },
+        timeout=MILVUS_SEARCH_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()["results"]
+
 
 def _select_topk_docs_by_first_hit(hits: list, k: int) -> list[str]:
     """
@@ -96,8 +104,8 @@ def _select_topk_docs_by_first_hit(hits: list, k: int) -> list[str]:
     """
     seen, ordered = set(), []
     for h in hits:
-        ent = getattr(h, "entity", {})
-        title = (ent or {}).get(TITLE_FIELD) or "Untitled"
+        ent = h.get("entity", {}) or {}
+        title = ent.get(TITLE_FIELD) or "Untitled"
         if title not in seen:
             seen.add(title)
             ordered.append(title)
@@ -121,7 +129,6 @@ def _select_topk_docs_weighted(
         C_d = count(d) / max_count
         S_d = alpha * R_d + (1 - alpha) * C_d
     """
-    # Optionally cap to first top_n_chunks hits for scoring
     if top_n_chunks is not None:
         hits = hits[:top_n_chunks]
 
@@ -134,7 +141,7 @@ def _select_topk_docs_weighted(
     counts: Counter[str] = Counter()
 
     for idx, h in enumerate(hits):
-        ent = h.get("entity", {})
+        ent = h.get("entity", {}) or {}
         title = ent.get(TITLE_FIELD) or "Untitled"
         counts[title] += 1
         if title not in first_idx:
@@ -153,7 +160,6 @@ def _select_topk_docs_weighted(
         score = alpha * rank_score + (1.0 - alpha) * count_score
         doc_scores[title] = score
 
-    # Sort by combined score, descending
     ordered_titles = sorted(
         doc_scores.keys(),
         key=lambda t: doc_scores[t],
@@ -171,11 +177,11 @@ def _map_doc_to_info(hits: list, wanted_titles: list[str]) -> dict[str, dict]:
     out = {t: None for t in wanted_titles}
     wanted = set(wanted_titles)
     for h in hits:
-        ent = getattr(h, "entity", {})
-        t   = (ent or {}).get(TITLE_FIELD) or "Untitled"
+        ent = h.get("entity", {}) or {}
+        t = ent.get(TITLE_FIELD) or "Untitled"
         if t in wanted and out[t] is None:
-            p = (ent or {}).get(PATH_FIELD)
-            u = (ent or {}).get(FILE_UUID_FIELD)
+            p = ent.get(PATH_FIELD)
+            u = ent.get(FILE_UUID_FIELD)
             if p:
                 out[t] = {"path": p, "uuid": u}
                 if all(out[v] is not None for v in wanted_titles):
@@ -183,7 +189,6 @@ def _map_doc_to_info(hits: list, wanted_titles: list[str]) -> dict[str, dict]:
     return {t: info for t, info in out.items() if info}
 
 def _read_file(path: str) -> str:
-    # Safe read function in case file is an incorrect format or is corrupted
     try:
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
@@ -196,50 +201,43 @@ def rag_answer(question: str,
                top_n_chunks: int = 50,
                qa_context: str = "",
                kb_name: str = None) -> str:
-    # 1) embed query via OpenAI
     qvec = _embed_query(question)
 
-    # 2) ANN: get many chunk candidates
-    db_path = get_kb_path(kb_name) if kb_name else None
-    conn = _milvus_connect(db_path=db_path); conn.load()
-    hits = conn.search(qvec, top_k=top_n_chunks, output_fields=[TITLE_FIELD, PATH_FIELD, TEXT_FIELD, FILE_UUID_FIELD])
-    # Count how many chunks per file title in the top results
-    file_counts = Counter(hit["entity"].get(TITLE_FIELD, "unknown") for hit in hits if "entity" in hit)
+    hits = _milvus_search(
+        qvec, top_k=top_n_chunks,
+        output_fields=[TITLE_FIELD, PATH_FIELD, TEXT_FIELD, FILE_UUID_FIELD],
+        kb_name=kb_name,
+    )
+
+    file_counts = Counter(
+        hit.get("entity", {}).get(TITLE_FIELD, "unknown")
+        for hit in hits if "entity" in hit
+    )
 
     print("Top 10 hits:")
     for i, h in enumerate(hits[:10]):
         ent = h.get("entity", {}) or {}
         title = ent.get(TITLE_FIELD, "unknown")
-        # print(ent.get(TEXT_FIELD, "unknown"))
-        # print('----------------------------\n\n\n\n\n')
         print(f"{i + 1}: {title}")
     
     print("Chunk counts by file (top {top_n_chunks}):")
     for title, count in file_counts.most_common():
         print(f"{count:2d}  {title}")
 
-    # Chose K documents by first appearance
-    # top_docs = _select_topk_docs_by_first_hit(hits, k=top_k_docs)
-
-    # chunks_text = [hit.get("entity", {}).get(TEXT_FIELD, "") for hit in hits]
-
-    #3) choose K documents by weighted rank and count policy
     top_docs = _select_topk_docs_weighted(
         hits,
         k=top_k_docs,
-        alpha=0.75,              # tweak if desired
+        alpha=0.75,
         top_n_chunks=top_n_chunks,
     )
     print("[diag] top_docs:", top_docs)
 
-    # 4) map each doc to its absolute path, then load full files
     doc_infos = _map_doc_to_info(hits, top_docs)
     print("[diag] doc_infos:", doc_infos)
     context = _build_full_doc_context_from_paths(doc_infos, budget_tokens=ctx_budget_tokens, kb_name=kb_name)
     if not context:
         return "Insufficient context to answer from the knowledge base."
 
-    # 5) chat
     client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
     print(f"QA context loaded: {qa_context}")
     
@@ -291,28 +289,16 @@ def rag_answer_stream(
     Streaming variant of rag_answer(): identical retrieval + doc-selection + prompt,
     but yields SSE lines OpenWebUI can stream.
     """
-
-    def _ent(h):
-        # Works whether hits are dicts or objects with .entity
-        if isinstance(h, dict):
-            return h.get("entity", {}) or {}
-        return getattr(h, "entity", {}) or {}
-
     client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
 
-    # 1) embed query
     qvec = _embed_query(question)
 
-    # 2) ANN search over chunks
-    db_path = get_kb_path(kb_name) if kb_name else None
-    conn = _milvus_connect(db_path=db_path); conn.load()
-    hits = conn.search(
-        qvec,
-        top_k=top_n_chunks,
+    hits = _milvus_search(
+        qvec, top_k=top_n_chunks,
         output_fields=[TITLE_FIELD, PATH_FIELD, TEXT_FIELD, FILE_UUID_FIELD],
+        kb_name=kb_name,
     )
 
-    # 3) choose K documents by weighted rank+count policy (same as rag_answer)
     top_docs = _select_topk_docs_weighted(
         hits,
         k=top_k_docs,
@@ -321,11 +307,10 @@ def rag_answer_stream(
     )
     print("[diag] top_docs:", top_docs)
 
-    # 4) robust doc->path mapping (keeps behavior consistent even if hit type changes)
     doc_infos = {}
     wanted = set(top_docs)
     for h in hits:
-        ent = _ent(h)
+        ent = h.get("entity", {}) or {}
         t = ent.get(TITLE_FIELD) or "Untitled"
         if t in wanted and t not in doc_infos:
             p = ent.get(PATH_FIELD)
@@ -360,14 +345,12 @@ def rag_answer_stream(
         "8. Use `$` delimiters for inline math."
     )
 
-    # 5) chat (same prompt as rag_answer)
     user_msg = (
         f"Context (authoritative; cite using Markdown links [Title](Link)):\n{context}\n\n"
         f"{instructions}\n"
         f"Question:\n{question}\n\n"
     )
 
-    # optional initial role chunk (harmless; helps some clients)
     yield f"data: {json.dumps({'choices':[{'delta':{'role':'assistant'}}]})}\n\n"
 
     resp = client.chat.completions.create(
@@ -385,40 +368,6 @@ def rag_answer_stream(
         delta = event.choices[0].delta
         if delta and getattr(delta, "content", None):
             yield f"data: {json.dumps({'choices':[{'delta':{'content': delta.content}}]})}\n\n"
-
-def rag_answer_stream(question: str):
-    """
-    Streaming model response
-    """
-    client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
-
-    # build messages etc (same as rag_answer)
-    qvec = _embed_query(question)
-    conn = _milvus_connect(); conn.load()
-    hits = conn.search(qvec, top_k=50, output_fields=[TITLE_FIELD, PATH_FIELD, TEXT_FIELD, FILE_UUID_FIELD])
-    top_docs = _select_topk_docs_by_first_hit(hits, 5)
-    doc_infos = _map_doc_to_info(hits, top_docs)
-    context = _build_full_doc_context_from_paths(doc_infos, budget_tokens=40000)
-
-    user_msg = (
-        f"Context:\n{context}\n\n"
-        f"Question: {question}\n"
-    )
-
-    resp = client.chat.completions.create(
-        model=CHAT_COMPLETION_MODEL,
-        messages=[{"role":"system","content":SYSTEM_PROMPT},
-                  {"role":"user","content":user_msg}],
-        stream=True,
-        temperature=0.7,
-        max_tokens=3000,
-    )
-
-    for event in resp:
-        delta = event.choices[0].delta
-        if delta and delta.content:
-            # IMPORTANT: SSE format required by OpenWebUI
-            yield f"data: {json.dumps({'choices':[{'delta':{'content':delta.content}}]})}\n\n"
 
 if __name__ == "__main__":
     import sys

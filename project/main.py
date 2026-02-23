@@ -13,22 +13,32 @@ import jwt
 import traceback
 import sys
 import os
+from datetime import datetime, timedelta
 
 # Add parent directory to sys.path to allow importing config
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from database import get_db, init_db, close_db, seed_data, User, Question, Message, MessageRole
+from database import (
+    get_db, init_db, close_db, seed_data, User, Question, Message, 
+    MessageRole, normalize_email, Class, Enrollment, AuditLog, ClassRole, TAAllowlist
+)
 from auth import (
     hash_password, verify_password, create_access_token,
-    get_current_user, require_instructor, SECRET_KEY, ALGORITHM
+    get_current_user, require_instructor, require_verified_user,
+    require_class_instructor, SECRET_KEY, ALGORITHM
 )
 from schemas import (
     RegisterRequest, RegisterResponse, LoginRequest, LoginResponse,
     UserResponse, QuestionCreate, QuestionCreateResponse,
     QuestionResponse, MessageResponse, InstructorQuestionResponse,
     SuggestAnswerResponse, MessageCreate, MessageCreateResponse,
-    KBCreateRequest, KBFileDeleteRequest
+    KBCreateRequest, KBFileDeleteRequest, VerifyEmailRequest,
+    ClassCreateRequest, ClassResponse, RotateCodeResponse, JoinClassRequest,
+    RosterResponse, RosterUserResponse, SetRoleRequest, UpdateEmailRequest
 )
+from email_utils import generate_verification_token, send_verification_email
+import secrets
+import string
 from services import (
     get_suggested_answer,
     get_knowledge_bases,
@@ -110,8 +120,10 @@ async def register(
     db: AsyncSession = Depends(get_db)
 ):
     """Register a new user."""
+    normalized_email = normalize_email(request.email)
+    
     result = await db.execute(
-        select(User).where(User.email == request.email)
+        select(User).where(User.email == normalized_email)
     )
     existing_user = result.scalar_one_or_none()
     
@@ -121,17 +133,68 @@ async def register(
             detail="Email already registered"
         )
     
+    token = generate_verification_token()
+    
     new_user = User(
-        email=request.email,
+        email=normalized_email,
         password_hash=hash_password(request.password),
-        role="student"
+        global_role="student",
+        verify_token_hash=hash_password(token),  # Re-use our password hasher for the token!
+        verify_expires_at=datetime.utcnow() + timedelta(minutes=15),
+        is_instructor_pending=(request.intent == "instructor")
     )
     
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
     
+    await send_verification_email(new_user.email, token)
+    
     return RegisterResponse(user_id=new_user.id)
+
+
+@app.post("/api/verify-email")
+async def verify_email(
+    request: VerifyEmailRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Verify a user's email address."""
+    normalized_email = normalize_email(request.email)
+    
+    result = await db.execute(
+        select(User).where(User.email == normalized_email)
+    )
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+        
+    if user.email_verified:
+        return {"message": "Email already verified"}
+        
+    if not user.verify_token_hash or not verify_password(request.token, user.verify_token_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid verification token"
+        )
+        
+    if datetime.utcnow() > user.verify_expires_at:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification token expired"
+        )
+        
+    # Success, mark as verified and clean up
+    user.email_verified = True
+    user.verify_token_hash = None
+    user.verify_expires_at = None
+    user.token_version += 1 # Invalidate any existing sessions just in case
+    
+    await db.commit()
+    return {"message": "Email verified successfully"}
 
 
 @app.post("/api/login", response_model=LoginResponse)
@@ -140,8 +203,10 @@ async def login(
     db: AsyncSession = Depends(get_db)
 ):
     """Login and get access token."""
+    normalized_email = normalize_email(request.email)
+    
     result = await db.execute(
-        select(User).where(User.email == request.email)
+        select(User).where(User.email == normalized_email)
     )
     user = result.scalar_one_or_none()
     
@@ -150,17 +215,328 @@ async def login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
+        
+    if not user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email verification required. Please check your email inbox."
+        )
     
-    role_str = user.role if isinstance(user.role, str) else user.role.value
-    access_token = create_access_token(user.id, role_str)
+    role_str = user.global_role if isinstance(user.global_role, str) else user.global_role.value
+    access_token = create_access_token(user.id, role_str, token_version=user.token_version)
     
     return LoginResponse(access_token=access_token, role=role_str)
+
+
+# ==========================================
+# Class Management
+# ==========================================
+
+def generate_join_code(length: int = 8) -> str:
+    """Generate a random alphanumeric join code."""
+    alphabet = string.ascii_uppercase + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+@app.post("/api/classes", response_model=ClassResponse, status_code=status.HTTP_201_CREATED)
+async def create_class(
+    request: ClassCreateRequest,
+    current_user: User = Depends(require_instructor),
+    db: AsyncSession = Depends(get_db)
+):
+    """Create a new class (instructors only)."""
+    # 1. Generate code and create Class
+    join_code = generate_join_code()
+    
+    new_class = Class(
+        name=request.name,
+        code=request.name[:50], # Optional custom code vs name mapping if needed
+        join_code_hash=hash_password(join_code),
+        created_by_user_id=current_user.id
+    )
+    db.add(new_class)
+    await db.flush() # flush to get the new_class.id
+    
+    # 2. Auto-enroll creator as instructor
+    enrollment = Enrollment(
+        class_id=new_class.id,
+        user_id=current_user.id,
+        class_role=ClassRole.instructor
+    )
+    db.add(enrollment)
+    
+    # 3. Audit log
+    audit = AuditLog(
+        actor_user_id=current_user.id,
+        class_id=new_class.id,
+        action="create_class"
+    )
+    db.add(audit)
+    
+    await db.commit()
+    await db.refresh(new_class)
+    
+    # Return the raw join code ONLY upon creation
+    return ClassResponse(
+        id=new_class.id,
+        name=new_class.name,
+        code=join_code,
+        created_at=new_class.created_at
+    )
+
+@app.post("/api/classes/{class_id}/rotate-code", response_model=RotateCodeResponse)
+async def rotate_class_code(
+    class_id: int,
+    current_user: User = Depends(require_instructor),
+    db: AsyncSession = Depends(get_db)
+):
+    """Rotate the join code for a class (global instructors who created it)."""
+    result = await db.execute(select(Class).where(Class.id == class_id))
+    class_obj = result.scalar_one_or_none()
+    
+    if not class_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
+        
+    if class_obj.created_by_user_id != current_user.id:
+        # Check if they are an instructor in the class via enrollment
+        enroll_res = await db.execute(
+            select(Enrollment).where(
+                Enrollment.class_id == class_id, Enrollment.user_id == current_user.id
+            )
+        )
+        enroll = enroll_res.scalar_one_or_none()
+        if not enroll or enroll.class_role != ClassRole.instructor:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not an instructor for this class")
+
+    new_code = generate_join_code()
+    class_obj.join_code_hash = hash_password(new_code)
+    class_obj.join_code_rotated_at = datetime.utcnow()
+    
+    audit = AuditLog(
+        actor_user_id=current_user.id,
+        class_id=class_obj.id,
+        action="rotate_join_code"
+    )
+    db.add(audit)
+    
+    await db.commit()
+    return RotateCodeResponse(join_code=new_code)
+
+@app.post("/api/classes/join")
+async def join_class(
+    request: JoinClassRequest,
+    current_user: User = Depends(require_verified_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Join a class using a code."""
+    # To check the code securely (since we hashed it but didn't know which class id),
+    # we either fetch ALL classes and check hashing (slow), OR we assume our generated 
+    # codes are strong/cryptographic and we could just store it in plaintext in another field.
+    # Since we used bcrypt, we fetch all classes. Wait, we should optimize if there are many.
+    # For now, fetch all classes and check matches:
+    
+    result = await db.execute(select(Class))
+    classes = result.scalars().all()
+    
+    matched_class = None
+    for c in classes:
+        if c.join_code_hash and verify_password(request.code, c.join_code_hash):
+            matched_class = c
+            break
+            
+    if not matched_class:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid join code")
+        
+    async with db.begin_nested():
+        # Check if already enrolled
+        enroll_res = await db.execute(
+            select(Enrollment).where(
+                Enrollment.class_id == matched_class.id,
+                Enrollment.user_id == current_user.id
+            )
+        )
+        if enroll_res.scalar_one_or_none():
+            return {"message": "Already enrolled", "class_id": matched_class.id}
+            
+        # Check TA Allowlist
+        role = ClassRole.student
+        ta_res = await db.execute(
+            select(TAAllowlist).where(
+                TAAllowlist.class_id == matched_class.id,
+                TAAllowlist.email == normalize_email(current_user.email)
+            )
+        )
+        if ta_res.scalar_one_or_none():
+            role = ClassRole.ta
+            
+        enrollment = Enrollment(
+            class_id=matched_class.id,
+            user_id=current_user.id,
+            class_role=role
+        )
+        db.add(enrollment)
+        
+        audit = AuditLog(
+            actor_user_id=current_user.id,
+            class_id=matched_class.id,
+            action=f"joined_class_as_{role.name if not isinstance(role, str) else role}"
+        )
+        db.add(audit)
+        
+    await db.commit()
+    return {"message": "Successfully joined class", "class_id": matched_class.id, "role": role}
+
+
+@app.get("/api/classes/{class_id}/roster", response_model=RosterResponse)
+async def get_class_roster(
+    class_id: int,
+    current_user: User = Depends(require_verified_user), # Workaround for path param dependency
+    db: AsyncSession = Depends(get_db)
+):
+    """Get the roster of a class (instructors only)."""
+    # Workaround for dynamic path parameter dependency
+    # We do the check manually here because Depends() resolves before the function body
+    enroll_res = await db.execute(
+        select(Enrollment).where(
+            Enrollment.class_id == class_id, Enrollment.user_id == current_user.id
+        )
+    )
+    enroll = enroll_res.scalar_one_or_none()
+    user_g_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
+    
+    if user_g_role != "admin" and (not enroll or (isinstance(enroll.class_role, str) and enroll.class_role != "instructor") and (not isinstance(enroll.class_role, str) and enroll.class_role.value != "instructor")):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Must be an instructor of this class.")
+
+    # Fetch users in the class
+    result = await db.execute(
+        select(User, Enrollment)
+        .join(Enrollment, User.id == Enrollment.user_id)
+        .where(Enrollment.class_id == class_id)
+    )
+    
+    roster_list = []
+    for user, enrollment in result.all():
+        roster_list.append(
+            RosterUserResponse(
+                user_id=user.id,
+                email=user.email,
+                full_name=user.full_name,
+                class_role=enrollment.class_role if isinstance(enrollment.class_role, str) else enrollment.class_role.value,
+                joined_at=enrollment.joined_at
+            )
+        )
+        
+    return RosterResponse(class_id=class_id, roster=roster_list)
+
+@app.post("/api/classes/{class_id}/set-role")
+async def set_class_role(
+    class_id: int,
+    request: SetRoleRequest,
+    current_user: User = Depends(require_verified_user), # Again, manual check below
+    db: AsyncSession = Depends(get_db)
+):
+    """Set a user's role in a class (instructors only)."""
+    # Dependency check workaround
+    enroll_res = await db.execute(
+        select(Enrollment).where(
+            Enrollment.class_id == class_id, Enrollment.user_id == current_user.id
+        )
+    )
+    enroll = enroll_res.scalar_one_or_none()
+    user_g_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
+    
+    if user_g_role != "admin" and (not enroll or (isinstance(enroll.class_role, str) and enroll.class_role != "instructor") and (not isinstance(enroll.class_role, str) and enroll.class_role.value != "instructor")):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Must be an instructor of this class.")
+        
+    # Find the target user's enrollment
+    target_res = await db.execute(
+        select(Enrollment).where(
+            Enrollment.class_id == class_id, Enrollment.user_id == request.user_id
+        )
+    )
+    target_enrollment = target_res.scalar_one_or_none()
+    
+    if not target_enrollment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User is not enrolled in this class.")
+        
+    old_role = target_enrollment.class_role if isinstance(target_enrollment.class_role, str) else target_enrollment.class_role.value
+    target_enrollment.class_role = request.class_role
+    
+    audit = AuditLog(
+        actor_user_id=current_user.id,
+        target_user_id=request.user_id,
+        class_id=class_id,
+        action="set_class_role",
+        old_value=old_role,
+        new_value=request.class_role
+    )
+    db.add(audit)
+    
+    await db.commit()
+    return {"message": "Role updated successfully"}
+
+
+# ==========================================
+# Account Management
+# ==========================================
+
+@app.post("/api/account/update-email")
+async def update_email(
+    request: UpdateEmailRequest,
+    current_user: User = Depends(require_verified_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Update user email and force re-verification."""
+    # Validate password
+    if not verify_password(request.password, current_user.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password")
+        
+    normalized_new_email = normalize_email(request.new_email)
+    
+    # Enforce @purdue.edu (could make this configurable later, hardcoding for now per plan)
+    if not normalized_new_email.endswith("@purdue.edu"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email must end with @purdue.edu")
+        
+    # Ensure it's not already taken
+    result = await db.execute(select(User).where(User.email == normalized_new_email))
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already in use")
+        
+    old_email = current_user.email
+        
+    # Re-fetch user in the current session to ensure changes are tracked
+    result_user = await db.execute(select(User).where(User.id == current_user.id))
+    db_user = result_user.scalar_one()
+
+    # Apply changes
+    db_user.email = normalized_new_email
+    db_user.email_verified = False
+    
+    token = generate_verification_token()
+    db_user.verify_token_hash = hash_password(token)
+    db_user.verify_expires_at = datetime.utcnow() + timedelta(minutes=15)
+    db_user.token_version += 1 # Invalidate current session
+    
+    # Audit log
+    audit = AuditLog(
+        actor_user_id=db_user.id,
+        target_user_id=db_user.id,
+        action="update_email",
+        old_value=old_email,
+        new_value=normalized_new_email
+    )
+    db.add(audit)
+    
+    await db.commit()
+    
+    await send_verification_email(normalized_new_email, token)
+    
+    return {"message": "Email updated successfully. Please verify your new email address to log in."}
 
 
 @app.get("/api/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(get_current_user)):
     """Get current user information."""
-    role_str = current_user.role if isinstance(current_user.role, str) else current_user.role.value
+    role_str = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
     return UserResponse(
         id=current_user.id,
         email=current_user.email,
@@ -175,7 +551,7 @@ async def create_question(
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new question (students only)."""
-    user_role = current_user.role if isinstance(current_user.role, str) else current_user.role.value
+    user_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
     if user_role != "student":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -356,7 +732,7 @@ async def create_message(
             detail="Question not found"
         )
     
-    user_role = current_user.role if isinstance(current_user.role, str) else current_user.role.value
+    user_role = current_user.global_role if isinstance(current_user.global_role, str) else current_user.global_role.value
     
     if user_role == "student" and question.user_id != current_user.id:
         raise HTTPException(

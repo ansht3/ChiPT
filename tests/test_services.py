@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """
-Test script to verify all Q&A system services are working
+Test File: test_services.py
+Description: Test script to verify all Q&A system services (Main QA, AI Service, Cache Service) are running and communicating correctly.
+How it is tested: It uses the httpx library to make direct HTTP requests to the independently running service endpoints, checking health indicators, cache stats, search functionalities, and AI generation hooks.
 """
 import httpx
 import asyncio
 import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../project')))
+
 from typing import Tuple
 from config import MAIN_QA_URL, AI_SERVICE_URL, CACHE_SERVICE_URL
 
